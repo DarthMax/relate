@@ -292,6 +292,59 @@ cold-compiled the full dependency tree per release.
   rotates the rust-cache lock-hash — the stale-generation restore plus
   sccache is the expected warm shape, same as the shared-key families).
 
+### The Swift lane
+
+The `swift` lane (`make test-swift`) builds the same five release
+libraries as the `xcframework` legs, one after another. On the
+2026-11-13 run for #335 those builds took 31 min 16 s of the lane's
+35 minutes, each from scratch: the gate runs in a copy of the checkout
+(SwiftPM needs the directory to be named `relate`), so the build output
+never reaches the target directory rust-cache saves.
+
+The lane runs the preamble with sccache on, like those legs. It has one
+step of its own before the preamble: sccache's GHA backend reads the
+cache service address and the job's runtime token from the environment,
+the runner gives them to JavaScript actions only, and the preamble does
+not read them. Without them the preamble's probe fails and the lane
+compiles uncached, with the probe's warning in the log.
+
+The token stays out of the job environment (OPLANE_REQ-00362889):
+
+- The step that reads the two values publishes them as step outputs, and
+  only the preamble step receives them, as step-level `env`. The
+  preamble's probe starts the sccache server, which reads them once.
+- The server runs with no idle timeout, because a server that restarted
+  later would find no credentials.
+- `make build-xcframework`, the only part of the gate that compiles
+  Rust, runs first as a step of its own. The next step prints `sccache
+  --show-stats` and stops the server. `make test-swift` then runs whole,
+  with no cache server, no compiler wrapper and no token in its
+  environment: its build prerequisite finds the libraries already built
+  and compiles nothing (cargo's fingerprints do not include the
+  wrapper), and the Swift tests, the examples, the iOS example's tests
+  and the app build follow.
+
+What this does not cover: during the build the server holds the token in
+its own process environment, and a process of the same user, such as a
+Rust build script, could read it there. The token is the job's own, ends
+with the job, and writes only to caches of the pull request's ref.
+
+Measured on #360 (2026-11-14), the five builds:
+
+| Run | Builds | Cache |
+| --- | --- | --- |
+| Before, #335 | 31 min 16 s | off |
+| First run with the cache | 28 min 32 s | 596 misses, all written |
+| Second run | 2 min 3 s | 596 hits, 0 misses |
+| Third run, token scoped as above | 56 s | 596 hits, 0 misses |
+
+The third run's whole job took 2 min 58 s.
+
+Not served from the cache: the `relate-ffi` crate itself (it also builds
+a `cdylib`, which sccache does not cache); it is rebuilt in each of
+those two minutes. A pull request reads the entries saved on `main` and
+by its own earlier runs, so the first build of changed Rust is cold.
+
 Pool note: each `xcframework` leg's plain-key rust-cache entry carries
 one triple's dependency artifacts (small entries); the `swift-stamp`
 entry carries five triples only when its retry path actually rebuilt.
