@@ -10,15 +10,20 @@ public final class Transaction {
     /// What kind of scope this is. The mode owns how the scope ends and
     /// which statements it keeps.
     enum Mode {
-        /// Commits when the body returns.
-        case write
+        /// Commits when the body returns; `tags` travel with the commit.
+        case write(tags: Set<String>)
         /// Always rolls back; a statement that is not a read is refused.
         case read
+
+        /// Whether this is the mode that keeps nothing.
+        var isReadOnly: Bool {
+            if case .read = self { true } else { false }
+        }
 
         /// Ends a transaction whose body ran to completion.
         func finish(on connection: Connection) throws(RelateError) {
             switch self {
-            case .write: try connection.commit()
+            case .write(let tags): try connection.commit(tags: tags)
             case .read: try connection.rollback()
             }
         }
@@ -28,7 +33,7 @@ public final class Transaction {
             // The statement ran, but only in this transaction's overlay,
             // which a read always rolls back. Refusing here is what tells
             // the caller the write was never going to land.
-            if self == .read, result.queryType != .read {
+            if isReadOnly, result.queryType != .read {
                 throw RelateError.misuse(
                     "a \(result.queryType) statement ran in a read; nothing it changed is kept — use a write")
             }
@@ -41,7 +46,7 @@ public final class Transaction {
 
     /// Whether this scope is a read: its transaction is rolled back, and a
     /// statement that is not a read is refused.
-    public var isReadOnly: Bool { mode == .read }
+    public var isReadOnly: Bool { mode.isReadOnly }
 
     init(connection: Connection, mode: Mode) {
         self.connection = connection
@@ -104,9 +109,14 @@ extension Connection {
     /// again, up to that many more times (a count below one: never).
     /// `body` must therefore be safe to run more than once; anything it did
     /// outside the transaction is not undone.
+    ///
+    /// `tags` travel with the commit to ``Database/commits(bufferingPolicy:)``, so an
+    /// observer can tell which commits concern it.
     @discardableResult
-    public func transaction<T>(retries: Int = 0, _ body: (Transaction) throws -> T) throws -> T {
-        try retrying(retries, lift: { $0 }, body)
+    public func transaction<T>(
+        retries: Int = 0, tags: Set<String> = [], _ body: (Transaction) throws -> T
+    ) throws -> T {
+        try retrying(retries, tags: tags, lift: { $0 }, body)
     }
 
     /// Runs `body` in a transaction that is always rolled back: every
@@ -120,10 +130,10 @@ extension Connection {
     /// Runs statements in one transaction: all commit, or none do. With
     /// `retries`, a retryable failure runs them all again.
     @discardableResult
-    public func runInTransaction(_ statements: [Statement], retries: Int = 0) throws(RelateError)
-        -> [QueryResult]
-    {
-        try retrying(retries, lift: { $0 }) { (scope: Transaction) throws(RelateError) in
+    public func runInTransaction(
+        _ statements: [Statement], retries: Int = 0, tags: Set<String> = []
+    ) throws(RelateError) -> [QueryResult] {
+        try retrying(retries, tags: tags, lift: { $0 }) { (scope: Transaction) throws(RelateError) in
             try scope.run(statements)
         }
     }
@@ -136,12 +146,13 @@ extension Connection {
     /// The one retry loop: a write attempt, again while the failure is one
     /// the engine marks retryable and attempts remain.
     private func retrying<T, Failure: Error>(
-        _ retries: Int, lift: (RelateError) -> Failure, _ body: (Transaction) throws(Failure) -> T
+        _ retries: Int, tags: Set<String>, lift: (RelateError) -> Failure,
+        _ body: (Transaction) throws(Failure) -> T
     ) throws(Failure) -> T {
         var attempts = 0
         while true {
             do throws(Failure) {
-                return try attempt(.write, lift: lift, body)
+                return try attempt(.write(tags: tags), lift: lift, body)
             } catch {
                 guard attempts < retries, let own = error as? RelateError, own.isRetryable else {
                     throw error

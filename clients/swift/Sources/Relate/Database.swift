@@ -149,12 +149,15 @@ public final class Database: Sendable {
 /// documents a `relate_database` as safe to share across threads.
 final class DatabaseCore: @unchecked Sendable {
     private let handle: OpaquePointer
+    /// The trace handler and commit subscribers every connection reports to.
+    let hub = ObserverHub()
 
     init(handle: OpaquePointer) {
         self.handle = handle
     }
 
     deinit {
+        hub.finish()
         // A close failure here has no caller to report to; the handle is
         // freed either way (poisoned handles included).
         _ = relate_database_close(handle)
@@ -194,6 +197,10 @@ public final class Connection {
     /// database owns it (through the pool) and outlives it, so it only
     /// refers back.
     private let owner: Database?
+    /// The counters of the open explicit transaction's statements: what its
+    /// commit reports to the database's commit stream. `begin` starts the
+    /// total, `commit` and `rollback` end it.
+    private var uncommittedStats = QueryStats.zero
 
     fileprivate init(handle: OpaquePointer, core: DatabaseCore, database: Database, keeping owner: Database?) {
         self.handle = handle
@@ -237,6 +244,33 @@ public final class Connection {
     public func query(_ cypher: String, _ parameters: [String: CypherValue] = [:])
         throws(RelateError) -> QueryResult
     {
+        try core.hub.observing(cypher, parameters) { () throws(RelateError) in
+            let result = try execute(cypher, parameters)
+            // Part of the observed step, so an auto-commit statement's
+            // commit is published before the trace handler hears of it.
+            noteCommitted(result)
+            return result
+        }
+    }
+
+    /// Commit bookkeeping for one successful statement. A bookmark is the
+    /// engine saying the statement committed by itself (auto-commit), and
+    /// that commit is published; without one, its counters wait for the
+    /// commit of the transaction it ran in.
+    private func noteCommitted(_ result: QueryResult) {
+        if let bookmark = result.bookmark {
+            core.hub.publish(Commit(bookmark: bookmark, stats: result.stats, tags: []))
+        } else {
+            uncommittedStats = uncommittedStats + result.stats
+        }
+    }
+
+    /// The statement itself, unobserved: bind, cross, check, copy out. The
+    /// package's own housekeeping statements (the poison probe) run here,
+    /// so they reach neither a trace nor the commit bookkeeping.
+    func execute(_ cypher: String, _ parameters: [String: CypherValue] = [:])
+        throws(RelateError) -> QueryResult
+    {
         let params: OpaquePointer? = try parameters.isEmpty ? nil : bindParameters(parameters)
         defer { if let params { relate_params_free(params) } }
         var out: OpaquePointer?
@@ -275,6 +309,7 @@ public final class Connection {
     public func begin() throws(RelateError) {
         var err: UnsafeMutablePointer<CChar>? = nil
         try check(relate_conn_begin(handle, &err), err, "beginning the transaction")
+        uncommittedStats = .zero
     }
 
     /// Commits the explicit transaction and returns its bookmark
@@ -284,6 +319,17 @@ public final class Connection {
     /// typed engine error — e.g. a retryable write conflict (ADR-0439).
     @discardableResult
     public func commit() throws(RelateError) -> String? {
+        try commit(tags: [])
+    }
+
+    /// `commit()`, with the `tags` its commit carries to the database's
+    /// commit stream.
+    @discardableResult
+    func commit(tags: Set<String>) throws(RelateError) -> String? {
+        // The transaction's bookkeeping ends here, whether or not the
+        // commit succeeds.
+        let stats = uncommittedStats
+        uncommittedStats = .zero
         var bookmark: UnsafeMutablePointer<CChar>? = nil
         var err: UnsafeMutablePointer<CChar>? = nil
         try check(
@@ -292,10 +338,13 @@ public final class Connection {
         // means the transaction committed nothing (ADR-0510).
         guard let bookmark else { return nil }
         defer { relate_free_string(bookmark) }
-        return try required(bookmark, "the commit's bookmark")
+        let text = try required(bookmark, "the commit's bookmark")
+        core.hub.publish(Commit(bookmark: text, stats: stats, tags: tags))
+        return text
     }
 
     public func rollback() throws(RelateError) {
+        uncommittedStats = .zero
         var err: UnsafeMutablePointer<CChar>? = nil
         try check(relate_conn_rollback(handle, &err), err, "rolling back the transaction")
     }
