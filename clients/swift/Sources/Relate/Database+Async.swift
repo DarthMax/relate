@@ -83,9 +83,7 @@ extension Database {
     func onWriter<T: Sendable>(
         _ operation: String, _ work: @escaping @Sendable (Connection) throws -> T
     ) async throws -> T {
-        guard !isReadOnly else {
-            throw RelateError.misuse("\(operation) on a database opened read-only")
-        }
+        try requireWritable(for: operation)
         return try await pool.withWriter(for: self, work)
     }
 }
