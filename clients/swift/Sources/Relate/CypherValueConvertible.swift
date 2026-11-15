@@ -1,8 +1,8 @@
 // MARK: - Swift values as Cypher values, both ways
 
 /// A Swift type that converts to and from a ``CypherValue``: what a
-/// parameter dictionary and a ``Record`` accessor accept in place of a
-/// hand-built enum case.
+/// parameter dictionary, an interpolated ``Statement`` and a ``Record``
+/// accessor accept in place of a hand-built enum case.
 ///
 /// Conversion from a `CypherValue` is strict. An integer widens to a
 /// floating-point type; nothing else converts — a string is never parsed
@@ -22,8 +22,7 @@ public protocol CypherValueConvertible {
 
 /// The one mismatch a conversion reports: `value` is not a `type`.
 func mismatch<T>(_ type: T.Type, _ value: CypherValue, reason: String? = nil) -> RelateError {
-    .unexpectedResult(
-        ResultMismatch(path: [], expected: "\(type)", found: value.kind.name, reason: reason))
+    shapeMismatch(expected: "\(type)", found: value.kind.name, reason: reason)
 }
 
 /// The payload `accessor` reads out of `value`, or the mismatch for `type`
@@ -38,9 +37,13 @@ func payload<T, Payload>(
 }
 
 /// The one mismatch a result of the wrong shape reports: a missing column,
-/// a row count other than the one asked for.
-func shapeMismatch(path: [String] = [], expected: String, found: String) -> RelateError {
-    .unexpectedResult(ResultMismatch(path: path, expected: expected, found: found))
+/// a row count other than the one asked for, a value a `Decodable` type
+/// does not decode from. Text that may quote a result value goes in
+/// `reason`, which the message sanitizes.
+func shapeMismatch(
+    path: [String] = [], expected: String, found: String, reason: String? = nil
+) -> RelateError {
+    .unexpectedResult(ResultMismatch(path: path, expected: expected, found: found, reason: reason))
 }
 
 /// The one nested conversion: `value` as a `T`, with `component` (a column
