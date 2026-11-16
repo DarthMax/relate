@@ -11,6 +11,16 @@ This module owns the git side (diffs, blobs, greps). The language side
 (unit extraction, signatures, hashing) lives in units.py; near-duplicate
 detection in similar.py.
 
+Every git diff this module and incremental.py run carries
+--no-ext-diff --no-textconv plus the core.fsmonitor and core.pager
+per-invocation pins: facts recomputation runs inside token-bearing post
+steps (the stellar and per-kind lanes recompute the facts after the
+shell-capable model step), where a model-written
+diff.external, diff.<driver>.command, or core.fsmonitor in .git/config —
+planted during the model step or re-added by a persistent model-spawned
+child between git calls — would otherwise execute during the diff (the
+fsmonitor hook fires on the index refresh `git diff` performs).
+
 Usage:
     facts.py [--base SHA] [--head SHA] [--out PATH] [--repo DIR]
              [--include-units-file PATH]
@@ -90,7 +100,7 @@ def _file_facts(repo: str, base: str, head: str, row: tuple[str, str, str],
     st, old_path = status.get(path, ("m", None))
     base_path = old_path or path
 
-    file_diff = git(repo, "diff", "--unified=0", base, head, "--", base_path, path)
+    file_diff = git(repo, "-c", "core.fsmonitor=", "-c", "core.pager=cat", "diff", "--no-ext-diff", "--no-textconv", "--unified=0", base, head, "--", base_path, path)
     added_lines, ranges = parse_file_diff(file_diff)
 
     record = {
@@ -221,10 +231,10 @@ def range_in_hunks(path: str, start: int, end: int, hbp: dict) -> bool:
 
 
 def build_facts(repo: str, base: str, head: str, include_units: list[str] | None = None) -> dict:
-    numstat = git(repo, "diff", "--numstat", "-z", "--find-renames", base, head)
-    name_status = git(repo, "diff", "--name-status", "-z", "--find-renames", base, head)
+    numstat = git(repo, "-c", "core.fsmonitor=", "-c", "core.pager=cat", "diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z", "--find-renames", base, head)
+    name_status = git(repo, "-c", "core.fsmonitor=", "-c", "core.pager=cat", "diff", "--no-ext-diff", "--no-textconv", "--name-status", "-z", "--find-renames", base, head)
     deps = extract_all_deps(repo, head)
-    diff_text = git(repo, "diff", "--find-renames", base, head)
+    diff_text = git(repo, "-c", "core.fsmonitor=", "-c", "core.pager=cat", "diff", "--no-ext-diff", "--no-textconv", "--find-renames", base, head)
     include_units = include_units or []
     status = parse_name_status_z(name_status)
 
@@ -455,8 +465,16 @@ def extract_all_deps(repo: str, head: str) -> dict[str, list[str]]:
 
 DOCS_PATH = re.compile(r"^(?:docs/|website/|\.github/|baselines/|clients/.*/README|README|AGENTS\.md|CHANGELOG|LICENSE)")
 
+# Source files living under docs-classified directories: the API
+# surfaces' runnable examples (compiled and executed by CI — doctests,
+# client integration builds) are code in every sense that matters for
+# classification; a .rs under docs/ is a code change, not a docs edit.
+DOCS_CODE_EXT = (".rs", ".c", ".h", ".py", ".sh", ".js", ".ts", ".java", ".go", ".rb", ".swift")
+
 
 def is_docs(path: str) -> bool:
+    if path.endswith(DOCS_CODE_EXT):
+        return False
     if DOCS_PATH.match(path):
         return True
     return path.endswith((".md", ".mdx", ".txt", ".svg", ".png", ".mermaid"))
@@ -469,6 +487,11 @@ def main() -> None:
     ap.add_argument("--base", help="base SHA (default: merge-base HEAD origin/main)")
     ap.add_argument("--head", default="HEAD", help="head SHA (default: HEAD)")
     ap.add_argument("--out", help="output path (default: <repo>/.stellar/facts.json)")
+    ap.add_argument("--stdout-json", action="store_true",
+                    help="also print the facts JSON to stdout (a pipe channel: "
+                         "gates consume the bytes straight from this process, "
+                         "never from the model-writable file on disk; the file "
+                         "write is unchanged)")
     ap.add_argument("--repo", default=".", help="repository directory")
     ap.add_argument("--include-units-file",
                     help="file with newline-separated extra paths to inventory "
@@ -493,12 +516,20 @@ def main() -> None:
     with open(out, "w") as fh:
         json.dump(facts, fh, indent=2, sort_keys=True)
         fh.write("\n")
-
     n_files = len(facts["files"])
     n_units = len(facts["units"])
     n_changed = len(facts["changed_units"])
-    print(f"facts: {n_files} files, {n_units} units ({n_changed} changed), "
-          f"{len(facts['sites'])} sites, {len(facts['similarity'])} similar pairs -> {out}")
+    summary = (f"facts: {n_files} files, {n_units} units ({n_changed} changed), "
+               f"{len(facts['sites'])} sites, {len(facts['similarity'])} similar pairs -> {out}")
+    if args.stdout_json:
+        # Pipe mode: stdout carries ONLY the JSON, as its final content —
+        # the consumer parses the first JSON value from the stream, so
+        # nothing may follow it. The summary rides stderr (both land in
+        # the job log).
+        print(summary, file=sys.stderr)
+        sys.stdout.write(json.dumps(facts, indent=2, sort_keys=True) + "\n")
+    else:
+        print(summary)
 
 
 if __name__ == "__main__":

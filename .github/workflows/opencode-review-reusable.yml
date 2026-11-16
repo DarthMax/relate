@@ -7,6 +7,91 @@ name: OpenCode Review — Reusable
 # Trigger, draft/same-repo if-guard, concurrency, and permissions all live in
 # the callers: a workflow_call workflow has no pull_request event of its own,
 # and a called workflow can never exceed the caller job's permissions.
+#
+# Every lane runs the model step without any GitHub token and with its
+# $GITHUB_ENV/$GITHUB_PATH publish channels blanked; all posting is
+# scripted in post steps that restore the workspace first — sourcing
+# the restore choreography from the PR head's committed copy, never the
+# model-writable worktree (ADR-0603).
+#
+# The blanking stops the model's own file-command writes, not every
+# publication channel: the runner's env file for a later step lives
+# under RUNNER_TEMP at a path a model shell can write directly. Each
+# token-bearing post step therefore pins its process-start environment
+# in its step env block: every env channel the ELF loader and the
+# runner's interpreters document for loading code at process start —
+# the loader's LD_PRELOAD, LD_LIBRARY_PATH and LD_AUDIT (ld.so(8));
+# the shell startup files BASH_ENV (bash(1)) and ENV (POSIX sh);
+# python's PYTHONSTARTUP, PYTHONPATH and PYTHONHOME (python(1));
+# node's NODE_OPTIONS and NODE_PATH (node(1)); perl's PERL5OPT,
+# PERL5LIB and PERLLIB (perlrun(1)); ruby's RUBYOPT and RUBYLIB
+# (ruby(1)); RubyGems' GEM_HOME and GEM_PATH (gem(1)) — each pinned
+# to the empty string, PATH to the fixed system list
+# review-restore.sh also pins. An empty value is inert for every one
+# of them (an empty list has no entries; an empty startup-file name
+# opens nothing), so the pins change no step behavior — they only
+# hold the channels closed from process start. A step env entry
+# is the most specific Actions env scope and so overrides anything
+# published into the job (workflow-syntax docs,
+# jobs.<job_id>.steps.env), and the runner applies it before the
+# step's first process starts — where the restore script's in-script
+# PATH pin is already too late for shell/loader startup.
+#
+# The same step env pins git's configuration file sources (the round-5
+# finding: the model shell can write .git/config, the worktree-scoped
+# config and the shared HOME gitconfig, and every git command the post
+# steps run parses them): GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM
+# point at /dev/null, GIT_CONFIG_NOSYSTEM skips the system file
+# outright, and GIT_CONFIG_COUNT=0 zeroes the env-numbered config
+# channel — GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n pairs are git
+# configuration too, plantable through the same RUNNER_TEMP env file.
+# The zero is the posture of every git call but the authenticated
+# fetches: lib/review-endpoints.sh's git_authed (the one authenticated
+# git invocation every fetch in these steps routes through) raises the
+# count to exactly 1 through command-scoped assignments of a fixed key
+# and the step's assembled credential, for the fetch command alone —
+# the GitHub token reaches git through that env-numbered channel,
+# never the command line, where a surviving model-spawned process
+# would read it through ps (the round-9 Medium); the two spellings
+# cannot conflict, and a model-published pair stays inert everywhere
+# else.
+# What survives is the repository's own .git/config, and that file the
+# restore choreography replaces outright — before its first git
+# invocation — with the minimal trusted configuration the checkout
+# genuinely needs (nothing sourced from model-writable state; the
+# round-6 finding: a model-written core.worktree redirects the reset
+# to a decoy directory, filter.<driver>.smudge plus core.attributesFile
+# executes during reset --hard, and url.*.insteadOf rewrites the fetch
+# URL to an ext:: command). Until the replacement lands, every git
+# call in these steps — the staging git show, the helper's reset,
+# clean and ls-files, the prep fetches — pins the same knobs off per
+# invocation: -c core.fsmonitor= -c core.pager=cat -c core.worktree=.
+# -c protocol.ext.allow=never -c core.attributesFile=.
+# -c core.hooksPath=/dev/null — the last pin restoring the hooks
+# guarantee the round-7 GIT_CONFIG_GLOBAL=/dev/null pin had masked
+# (the round-9 High: the model shell can write the default .git/hooks
+# directory, and probed on git 2.43/2.54 an undefended reset --hard
+# executes a model-crafted .git/hooks/reference-transaction — so the
+# minimal replacement .git/config itself carries
+# core.hooksPath = /dev/null and every invocation pins the same: each
+# hook lookup lands on /dev/null, where none is found).
+#
+# Round 8 closes the three channels that survived all of the above.
+# Replace objects are off — GIT_NO_REPLACE_OBJECTS=1 pinned in every
+# token-bearing post step's env, plus --no-replace-objects on the
+# staging git shows and the helper's reset — so a model-created
+# refs/replace/<SHA> entry cannot steer the staged helper bytes or
+# the reset target onto attacker-crafted objects. .git/info/attributes
+# — the one attribute source no pin or replacement covered — is
+# deleted by the restore choreography alongside the config
+# replacement; the worktree .gitattributes the reset restores is then
+# the only attribute source left, with core.attributesFile pinned
+# empty. And the facts-recomputation diffs (facts.py's four reads and
+# incremental.py's anchoring patch, recomputed here after the model
+# step) carry --no-ext-diff --no-textconv, so a model-written
+# diff.external or diff.<driver>.command — planted during the model
+# step or re-added to .git/config by a persistent model-spawned child
+# between git calls — cannot execute during facts recomputation.
 
 on:
   workflow_call:
@@ -24,12 +109,12 @@ on:
         required: true
         type: string
       pipeline:
-        description: '"model" (default) posts via the model per opencode-review-protocol.md; "scripted" runs the ADR-0271 deterministic pipeline (facts/scope/brief before, post.py after) and the model only writes .stellar/findings.json.'
+        description: '"scripted" runs the ADR-0271 stellar pipeline (facts/scope/brief before, post.py after); "kind" (default) runs the per-kind pipeline (ADR-0603): scripted inputs and the no-op gate before, opencode-review-post.py after. Both run the model without a GitHub token — its only output is .stellar/findings.json.'
         required: false
         type: string
-        default: 'model'
+        default: 'kind'
       review_timeout_minutes:
-        description: 'The model run is capped at this many minutes of wall clock, of which the last three are shutdown headroom (SIGINT grace, kill-after, the timeout marker write) — the model itself gets the rest. A timed-out run never passes: whichever findings document survived posts as a forced-fail partial round, or — if none — the poster reports a distinct timeout reason; the next push or re-run starts a fresh round. Per-kind override knob (LABS-635).'
+        description: 'The model run is capped at this many minutes of wall clock, of which the last three are shutdown headroom (SIGINT grace, kill-after, the timeout marker write) — the model itself gets the rest. A timed-out run never passes: the stellar poster posts whichever findings document survived as a forced-fail partial round, the per-kind poster fails closed without trusting the document of a killed run, and with no document either poster reports a distinct timeout reason; the next push or re-run starts a fresh round. Per-kind override knob (LABS-635).'
         required: false
         type: number
         default: 15
@@ -103,12 +188,11 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 1
-          # Scripted pipelines give the model step no credentials at all:
-          # the checkout token is not persisted into .git/config, and the
-          # scripted fetches below authenticate per command. (The model
-          # runs with shell access; a persisted token would be readable
-          # and usable for API writes.)
-          persist-credentials: ${{ inputs.pipeline != 'scripted' }}
+          # No pipeline path persists the checkout token into .git/config
+          # (ADR-0603): the model runs with shell access and would read a
+          # persisted token, so every later git operation authenticates
+          # per command with its own step's token.
+          persist-credentials: false
 
       - name: Install opencode
         # Pinned install (version + sha256, ADR-0258) lives in the script —
@@ -145,14 +229,42 @@ jobs:
             python3 .agents/skills/stellar-review/tools/post.py noop --repo "$REPO" --pr "$PR_NUMBER"
           fi
 
+      # Per-kind pipeline (rust, security — ADR-0603): the stellar
+      # scripted pipeline's shape, for whole-diff judgment instead of
+      # per-unit briefs. The pre-step fetches the endpoints, computes
+      # the merge-based diff artifact the model reads (never gh) and
+      # the kind's no-op gate — deterministically, not by the model:
+      # rust runs only on *.rs / Cargo.toml / Cargo.lock changes,
+      # security on any code change and always on the CI-control paths.
+      - name: Review inputs (${{ inputs.job_name }})
+        if: inputs.pipeline != 'scripted'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_KIND: ${{ inputs.review_kind }}
+        run: .github/scripts/opencode-review-prep.sh model
+
       # The runtime prompt is the per-kind header followed by the shared
       # protocol; concatenated they are equivalent to the pre-split
-      # single-file prompts. Scripted pipelines carry their own standalone
-      # prompt (posting is scripted, so the shared protocol does not apply).
-      - name: Load ${{ inputs.job_name }} prompt into env
+      # single-file prompts. The stellar scripted pipeline carries its
+      # own standalone prompt instead (the skill owns its dispatch shape,
+      # and the protocol's findings-document contract does not apply
+      # there).
+      #
+      # The prompt bytes are PR-controlled (the header and the protocol
+      # are read from the PR's own checkout), so they must never transit
+      # $GITHUB_ENV: the pre-fix heredoc write could be terminated early
+      # by a planted PROMPT_EOF line inside a prompt file, and every line
+      # after it would become an arbitrary NAME=VALUE environment write
+      # for all later steps — the token-bearing post steps included. The
+      # concatenated prompt lands in a file under RUNNER_TEMP instead
+      # (the timeout marker's channel), and only its fixed,
+      # runner-controlled path crosses the step boundary.
+      - name: Build ${{ inputs.job_name }} prompt file
         run: |
+          PROMPT_FILE="$RUNNER_TEMP/review-prompt.md"
           {
-            echo 'PROMPT<<PROMPT_EOF'
             echo "REPO: ${{ github.repository }}"
             echo "PR NUMBER: ${{ github.event.pull_request.number }}"
             echo "HEAD SHA: ${{ github.event.pull_request.head.sha }}"
@@ -162,25 +274,15 @@ jobs:
               echo
               cat .github/prompts/opencode-review-protocol.md
             fi
-            echo 'PROMPT_EOF'
-          } >> "$GITHUB_ENV"
-
-      # Scripted pipelines hand the model NO token: GitHub's && and ||
-      # return operands, not booleans, so a one-line expression cannot
-      # express this — compute it in shell where the logic is real.
-      - name: Compute model-step token (scripted)
-        if: inputs.pipeline == 'scripted'
-        run: echo 'MODEL_GH_TOKEN=none' >> "$GITHUB_ENV"
-
-      - name: Compute model-step token (model pipeline)
-        if: inputs.pipeline != 'scripted'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "MODEL_GH_TOKEN=$GH_TOKEN" >> "$GITHUB_ENV"
+          } > "$PROMPT_FILE"
+          # The workflow's only $GITHUB_ENV write, and a fixed value: a
+          # planted PROMPT_EOF line in a prompt file is inert file
+          # content now — no prompt byte reaches any step's environment.
+          echo "PROMPT_FILE=$PROMPT_FILE" >> "$GITHUB_ENV"
 
       - name: Run OpenCode (${{ inputs.job_name }} review)
-        # Scripted pipelines skip the model when the deterministic gate
-        # already decided (docs-only diff).
+        # The pre-steps skip the model when the deterministic gate already
+        # decided (a docs-only or kind-irrelevant diff).
         if: env.SCRIPTED_NOOP != 'true'
         env:
           # FIREWORKS_API_KEY must be provisioned as a repo secret (ADR-0258).
@@ -195,10 +297,109 @@ jobs:
           # subtracts the shutdown headroom from it.
           REVIEW_TIMEOUT_MINUTES: ${{ inputs.review_timeout_minutes }}
           OPENCODE_REVIEW_MODEL: ${{ secrets.OPENCODE_REVIEW_MODEL || vars.OPENCODE_REVIEW_MODEL || 'fireworks-ai/accounts/fireworks/routers/glm-fast-latest' }}
-          # Scripted pipelines post via scripts: the model gets the literal
-          # string "none" — an invalid token, so any gh call fails loudly.
-          # Model-driven pipelines get the real token for their gh posting.
-          GH_TOKEN: ${{ env.MODEL_GH_TOKEN }}
+          # No pipeline path hands the model a real token (ADR-0603): the
+          # literal string "none" is an invalid token, so any gh call
+          # fails loudly — the model reads its inputs from the scripted
+          # artifacts and posting belongs to the post steps.
+          GH_TOKEN: none
+          # The model shell must not publish environment variables or
+          # PATH entries into later steps (ADR-0603): the empty-string
+          # entries below replace the runner's $GITHUB_ENV/$GITHUB_PATH
+          # file paths with the empty string, so every write the model
+          # attempts against either fails — a BASH_ENV-style payload it
+          # plants this way is never live in the post steps. PROMPT_FILE,
+          # published by the fixed-value step above, still arrives here
+          # as a normal env var: blanking the channel stops new writes,
+          # it does not unset already-published values.
+          GITHUB_ENV: ''
+          GITHUB_PATH: ''
+          # Explicit deny rules for --auto (the round-6 finding): the
+          # flag auto-approves only what no deny rule blocks, so the
+          # classes the rest of the sandbox boundary cannot absorb are
+          # refused loudly instead — passwordless sudo and docker (the
+          # runner-root tamper channel; docker is sudo's root-equivalent
+          # on the hosted runners), the network-client shell commands
+          # and git's network verbs plus bash's /dev/tcp redirections
+          # (the provider-key exfil channel; FIREWORKS_API_KEY is
+          # necessarily in this step's environment), and tool writes to
+          # absolute paths outside the workspace and RUNNER_TEMP (the
+          # ordered _temp allow after the edit deny is the one
+          # carve-out — the runner's scratch space). Delivered as
+          # experimental.policies through OPENCODE_CONFIG_CONTENT, a
+          # virtual config layer the runner authors: the policy hook
+          # forces its deny AFTER rule evaluation, so a PR's own
+          # project config (an opencode.json in the reviewed tree — the
+          # last config layer, whose rules would otherwise win) cannot
+          # re-allow what this layer denies. A denied call fails the
+          # tool call, not the run — the model sees the refusal and
+          # continues, so the round-4 permission-abort class (a
+          # declined cleanup killing the lane) stays solved; a residual
+          # remains: the model can still read its process environment
+          # and echo values into its findings document, so a dedicated
+          # spend-capped review key is the ops follow-up.
+          OPENCODE_CONFIG_CONTENT: |-
+            {
+              "experimental": {
+                "policies": [
+                  {"action": "permission", "resource": "shell:sudo *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:docker *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:curl *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:wget *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:nc *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:ncat *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:socat *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:ssh *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:scp *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:sftp *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:ftp *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:telnet *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:rsync *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git clone *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git fetch *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git pull *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git push *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git ls-remote *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git submodule *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:*> /dev/tcp/*", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:*<>/dev/tcp/*", "effect": "deny"},
+                  {"action": "permission", "resource": "edit:/*", "effect": "deny"},
+                  {"action": "permission", "resource": "edit:/home/runner/work/_temp/*", "effect": "allow"},
+                  # The model's own network-capable TOOLS are denied
+                  # outright (the round-12 finding): the shell rules
+                  # above name literal shell clients, but webfetch and
+                  # websearch are separate tools the model can call
+                  # without a shell — and the review lanes never need
+                  # them (the prompts already forbid fetching external
+                  # URLs). The interpreter-socket residual (python/node
+                  # opening sockets despite the shell rules) remains the
+                  # adjudicated accepted risk bounded by the
+                  # spend-limited review key (LABS-1689).
+                  {"action": "permission", "resource": "webfetch", "effect": "deny"},
+                  {"action": "permission", "resource": "websearch", "effect": "deny"},
+                  # The absolute-path and env-wrapper spellings of the
+                  # denied tools (the round-16 finding): prefix patterns
+                  # match only the literal command names, so
+                  # /usr/bin/sudo, env sudo, /usr/bin/docker and the
+                  # -C form of git's network verbs slip past them. These
+                  # close the named vectors; the pattern-vs-sandbox
+                  # class itself (anything not named can still run) is
+                  # the adjudicated residual — the bounds are the
+                  # container-topology redesign and the spend-limited
+                  # review key (LABS-1689).
+                  {"action": "permission", "resource": "shell:/usr/bin/sudo *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:/usr/bin/docker *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:/usr/bin/curl *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:/usr/bin/wget *", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:env sudo*", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:env docker*", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:env curl*", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git -C * fetch*", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git -C * clone*", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git -C * pull*", "effect": "deny"},
+                  {"action": "permission", "resource": "shell:git -C * push*", "effect": "deny"}
+                ]
+              }
+            }
         # The cap (LABS-635): a wedged model must not hold the lane
         # hostage. SIGINT first (a graceful stop can still flush a
         # findings document), kill 60s later; a timed-out run leaves no
@@ -225,11 +426,30 @@ jobs:
         # kill-after, and the authoritative marker write.
         timeout-minutes: ${{ inputs.review_timeout_minutes }}
         run: |
+          # The prompt itself never travels through the environment: the
+          # build step above left the full text in $PROMPT_FILE, and it
+          # is read straight into the invocation's argv here.
           MARKER="$RUNNER_TEMP/review_timed_out"
           set +e
+          # --auto — auto-approve permission requests that no deny rule
+          # blocks (the flag's own contract). The runner sandbox is the
+          # permission boundary: the step carries no GitHub token
+          # (GH_TOKEN is the invalid literal "none"), its env-publish
+          # channels are blanked, and the post steps trust nothing the
+          # model left behind — so an approved shell call grants nothing
+          # the model could not already do, and every trust decision
+          # stays scripted in the posts. Without it, a non-interactive
+          # run auto-rejects whatever the permission classifier does not
+          # pre-allow: in run 43635101612 the security model's
+          # sandbox-experiment cleanup (`cd /; rm -rf "$T"`) was
+          # declined twice ("The user declined this tool call"),
+          # aborting the run before a findings document landed — the
+          # lane failed closed with no review at all. Fail-closed is
+          # unchanged: a genuinely failing run still writes no findings
+          # and still fails the lane.
           timeout --signal=INT --kill-after=60s \
             "$((REVIEW_TIMEOUT_MINUTES - 3))m" \
-            opencode run --model "$OPENCODE_REVIEW_MODEL" "$PROMPT"
+            opencode run --model "$OPENCODE_REVIEW_MODEL" --auto "$(cat "$PROMPT_FILE")"
           code=$?
           set -e
           if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
@@ -242,13 +462,16 @@ jobs:
       # Scripted pipeline: the poster rolls the ledger, posts one review
       # with all inline comments, derives the verdict, and updates the
       # summary comment. Missing/invalid findings fail closed (ADR-0258).
-      # Only .stellar/findings.json is model output: hooks are neutralized
-      # (a model-written post-checkout hook fires on the restore), tracked
-      # files are reset to HEAD (checkout restores the INDEX, which the
-      # model can stage), untracked shadows outside .stellar are removed,
-      # PATH is pinned ($GITHUB_PATH poisoning), the noop decision is
-      # recomputed here (the model can forge SCRIPTED_NOOP via $GITHUB_ENV
-      # to skip this step's cleanup), and facts/scope/ledger are
+      # Only .stellar/findings.json is model output: the restore-and-harden
+      # choreography (pinned PATH, model-written git configuration
+      # neutralized, hooks off, reset to the
+      # event-payload merge SHA, the untracked sweep outside .stellar,
+      # findings-file rejection, the timeout marker read into TIMED_OUT)
+      # is review-restore.sh — one spelling shared with the per-kind post
+      # and the enforce gate (ADR-0603), staged from trusted content (see
+      # the run block below). The noop decision is recomputed here, never
+      # trusted from the environment (the model step's publish channels
+      # are blanked; the recompute stays), and facts/scope/ledger are
       # recomputed from git + the trusted summary comment.
       - name: Post review (scripted)
         if: always() && inputs.pipeline == 'scripted'
@@ -259,44 +482,195 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           STELLAR_RESOLVE: ${{ vars.STELLAR_RESOLVE }}
+          # The trusted reset target the helper requires: the merge SHA
+          # from the event payload, the commit this checkout started
+          # from — never local HEAD, which the model step could have
+          # moved with a commit.
+          RESTORE_SHA: ${{ github.sha }}
+          # gh's target host and the enforce gate's repo variable are
+          # pinned too (the round-22 finding): the model can append to
+          # the runner's env command file under RUNNER_TEMP (blanking
+          # GITHUB_ENV does not remove that file), and an unpinned
+          # GH_HOST sends this step's GH_TOKEN to a host of the model's
+          # choosing on every gh api call; an unpinned
+          # GITHUB_REPOSITORY points the enforce gate's verdict-comment
+          # read at any public repository holding a forged pass
+          # verdict. The enterprise token is blanked alongside
+          # (github.com auth comes from GH_TOKEN alone).
+          GH_HOST: github.com
+          GH_ENTERPRISE_TOKEN: ''
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Process-start pinning (see the header note): these fixed
+          # literals are the most specific Actions env scope, so they
+          # override anything the model shell published into the job —
+          # and they hold from process start, where review-restore.sh's
+          # in-script PATH pin (kept as defense-in-depth) is already
+          # too late for shell/loader startup.
+          BASH_ENV: ''
+          ENV: ''
+          # Bash startup-option and trace-prompt pins: bash applies the
+          # options named in SHELLOPTS (and BASHOPTS) from the
+          # environment at startup, and xtrace expands PS4 — with
+          # command substitution — for every traced command, so a
+          # model-published SHELLOPTS=xtrace plus PS4='$(…)' executes
+          # in this step's very first shell command, inside the shell
+          # that holds GH_TOKEN and before the env -i re-exec runs (the
+          # round-26 finding). The empty pins hold from process start;
+          # the re-exec's rebuilt environment never carries these names
+          # at all.
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          LD_AUDIT: ''
+          PYTHONSTARTUP: ''
+          PYTHONPATH: ''
+          PYTHONHOME: ''
+          NODE_OPTIONS: ''
+          NODE_PATH: ''
+          PERL5OPT: ''
+          PERL5LIB: ''
+          PERLLIB: ''
+          RUBYOPT: ''
+          RUBYLIB: ''
+          GEM_HOME: ''
+          GEM_PATH: ''
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          # Git configuration source pins (see the header note): the
+          # model step can write the shared HOME gitconfig and plant
+          # env-numbered config pairs through the runner env file —
+          # pinning every file source (global, system, env-numbered)
+          # makes model-written configuration inert from process
+          # start, before the staging git show below runs;
+          # review-restore.sh re-exports the same pins
+          # (defense-in-depth), replaces the repository's own .git/config
+          # with the minimal trusted configuration before its first git
+          # invocation, and pins its remaining knobs per git invocation.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_COUNT: '0'
+          # Replace objects are off from process start (the round-8
+          # finding): the model step can create refs/replace/<SHA>
+          # entries, and git resolves every SHA through them by
+          # default — the staging show below would stage
+          # attacker-crafted helper bytes and the reset would land on
+          # an attacker-crafted tree. The shows and the reset also
+          # carry --no-replace-objects per invocation; this env pin
+          # covers every other git call the step runs (the prep
+          # fetches, merge-base resolutions, facts recomputation).
+          GIT_NO_REPLACE_OBJECTS: '1'
+          # Grafts are pinned off from process start (the round-11
+          # finding): .git/info/grafts is model-writable and a graft
+          # parenting the base onto the head silently empties the
+          # merge-base the facts recomputation resolves. /dev/null is
+          # a fixed non-empty value git accepts as "no grafts".
+          GIT_GRAFT_FILE: /dev/null
+          # The timeout marker's channel is pinned to the runner's real
+          # temp directory (the round-19 finding): a model-published
+          # RUNNER_TEMP or TMPDIR would redirect both the wrapper's
+          # authoritative marker write and the restore's read to a
+          # model-chosen location. These are runner-provided values
+          # (never PR-controlled) and the step-env pin beats anything
+          # published through the runner env file.
+          RUNNER_TEMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: |
-          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-          set -euo pipefail
-          git config --unset core.hooksPath 2>/dev/null || true
-          git config --global core.hooksPath /dev/null
-          # reset --hard, not checkout --: the model can stage files, and
-          # checkout restores from the INDEX; only HEAD is trusted.
-          git reset --hard HEAD
-          # Remove untracked shadow files outside .stellar, ignored ones
-          # included (-x: a gitignored droplet must not survive either —
-          # OPLANE_REQ-00333782; a planted .opencode-verdict.txt must NOT
-          # survive: it is written below).
-          git clean -fdx -- . ':(exclude).stellar'
+          # Bash imports exported functions (BASH_FUNC_<name>%%
+          # environment variables) at startup — including anything the
+          # model step published through the runner's env command file
+          # (blanking GITHUB_ENV in the model step does not remove that
+          # file) — and an imported function shadows every command this
+          # step runs by name: PATH-resolved binaries and regular builtins
+          # alike (printf, jq, git), so the PATH pin and every per-name
+          # unset below cannot reach it (the round-23 finding). The
+          # runner's environment therefore never reaches the shell that
+          # holds the token: this script re-execs into a fresh bash under
+          # a rebuilt environment (env -i plus the pass-through list
+          # below) that carries no BASH_FUNC_ entry, no env-file residue,
+          # and the same fixed-value pins the step env spells. Every
+          # construct the unclean outer shell evaluates is one an imported
+          # function cannot intercept: case/esac are reserved words (bash
+          # rejects a function definition named for one), and /usr/bin/env
+          # and /usr/bin/bash contain a slash (bash bypasses function and
+          # builtin lookup for names with a slash). The clean shell is this
+          # same script ($0, the runner's temp file) with __clean_reexec as
+          # $1 — an argv position the env-file channel cannot forge; the
+          # body below runs only there.
+          case "${1:-}" in
+            __clean_reexec)
+          # Trusted-source the choreography (ADR-0603): the worktree
+          # copy is model-writable, so the committed PR-head copy — git
+          # show of the head SHA from the event payload, the reviewed
+          # PR tree (the prep step fetched the endpoints, so it
+          # resolves; a missing object fails this step closed) — is
+          # staged into a fresh mktemp file and sourced from there.
+          # The staging show carries the full per-invocation pin set —
+          # --no-replace-objects (a model-created refs/replace entry
+          # cannot steer which object the show reads) plus the config
+          # knobs: the step env pins the config file sources, but the
+          # repository's own .git/config still parses until the sourced
+          # choreography replaces it, and its worktree/filter/transport
+          # and fsmonitor/pager knobs are redirection or code execution.
+          # Env-channel hardening (round-11): the model step can write
+          # the runner env file, so git's location/transport variables
+          # and the proxy/CA channels are unset before this step's
+          # first git or gh use — unset (not an empty pin: git treats
+          # an empty GIT_DIR as a fatal error) and the hosted runners
+          # need no proxy. Covers the staging show below and everything
+          # the sourced choreography and the poster run in this shell.
+          unset GIT_WORK_TREE GIT_DIR GIT_INDEX_FILE GIT_EXEC_PATH \
+            GIT_CONFIG_PARAMETERS GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES \
+            GIT_COMMON_DIR GIT_NAMESPACE GIT_SHALLOW_FILE GIT_REPLACE_REF_BASE \
+            HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY \
+            https_proxy http_proxy all_proxy no_proxy \
+            SSL_CERT_FILE CURL_CA_BUNDLE \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO
+          # The staging show below reads the worktree's object store,
+          # which the model step could have subverted (the round-14
+          # finding): a gitdir: redirect file in .git's place serving a
+          # fake store, an injected alternates file adding an object
+          # source, or loose objects rewritten under a target's name —
+          # git does not content-verify loose objects on read. Three
+          # checks close the channel before anything is staged and
+          # sourced: .git must be a real directory, no alternates file
+          # may remain, and fsck verifies every object's content
+          # against its name.
+          if [ ! -d .git ]; then
+            echo "post: .git is not a directory (gitdir: redirect?) — refusing to stage" >&2
+            exit 1
+          fi
+          rm -f .git/objects/info/alternates
+          # A model-planted .git/commondir file redirects the object
+          # store (and refs/config resolution) to a directory of the
+          # model's choosing — sidestepping the alternates deletion and
+          # the fsck below, which both operate on .git itself (the
+          # round-19 finding). The runner's checkout has no commondir
+          # file (.git IS the common dir), so any present one is
+          # planted and removed.
+          rm -f .git/commondir
+          # fsck itself reads the repository config — still the
+          # model-written .git/config at this point, where
+          # fsck.badObjectSha1=ignore would suppress exactly the
+          # content-against-name check this guard exists to run (the
+          # round-19 finding). The pins force the check to error level
+          # regardless of what the config says, and neutralize
+          # fsck.skipList (the round-20 finding — the config could
+          # exempt chosen objects from the check): the empty string is
+          # NOT a valid unset here (git tries to open an object-name
+          # list at the empty path and dies: "could not open object
+          # name list"), so the list is pinned to /dev/null — an
+          # always-empty list on a root-owned device node the runner
+          # user can neither replace nor write.
+          git -c fsck.badObjectSha1=error -c fsck.skipList=/dev/null fsck --full --no-progress >/dev/null
+          RESTORE="$(mktemp)"
+          git --no-replace-objects -c core.fsmonitor= -c core.pager=cat -c core.worktree=. -c protocol.ext.allow=never -c core.attributesFile= -c core.hooksPath=/dev/null show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
+          # shellcheck disable=SC1090
+          . "$RESTORE" .stellar/findings.json .stellar/findings.partial.json
           .github/scripts/stellar-prep.sh post
           T=.agents/skills/stellar-review/tools
-          # The timeout fact is the run step's marker file, written after
-          # the model process exited — never an env var the model could
-          # have forged into $GITHUB_ENV (OPLANE_REQ-00333784). A missing
-          # marker means the run step never reached its wrapper write:
-          # no timeout salvage, the generic fail path decides.
-          TIMED_OUT=0
-          [ -f "$RUNNER_TEMP/review_timed_out" ] \
-            && TIMED_OUT=$(cat "$RUNNER_TEMP/review_timed_out")
-          # Model output is accepted only as a REGULAR, UNTRACKED file
-          # inside .stellar — a symlink (pointing anywhere, runner files
-          # included) is deleted before validation and treated as no
-          # output, and so is a file tracked at HEAD: a PR force-adding
-          # .stellar/findings.json would survive the reset above and
-          # pose as model output, steering the poster onto the
-          # pass-capable branch (OPLANE_REQ-00333782). The model cannot
-          # place a tracked file here — its commits never reach this
-          # checkout's HEAD.
-          for f in .stellar/findings.json .stellar/findings.partial.json; do
-            if [ -L "$f" ] || git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
-              echo "post: rejecting non-model output $f (symlink or tracked at HEAD) — deleting"
-              rm -f "$f"
-            fi
-          done
           # noop is recomputed here, never trusted from the environment
           if [ "$(jq -r .has_code_changes .stellar/facts.json)" = "false" ]; then
             python3 "$T/post.py" noop --repo "$REPO" --pr "$PR_NUMBER"
@@ -349,35 +723,526 @@ jobs:
             python3 "$T/post.py" fail --repo "$REPO" --pr "$PR_NUMBER" \
               --reason "model run produced no valid .stellar/findings.json — $VALID_MSG"
           fi
+            ;;
+            *)
+              /usr/bin/env -i \
+                PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                LANG=C.UTF-8 \
+                HOME="$HOME" RUNNER_TEMP="$RUNNER_TEMP" TMPDIR="$TMPDIR" \
+                GH_TOKEN="$GH_TOKEN" GH_HOST=github.com \
+                GH_ENTERPRISE_TOKEN= GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+              BASE_SHA="$BASE_SHA" HEAD_SHA="$HEAD_SHA" REPO="$REPO" \
+              PR_NUMBER="$PR_NUMBER" STELLAR_RESOLVE="$STELLAR_RESOLVE" \
+              RESTORE_SHA="$RESTORE_SHA" \
+                GITHUB_ENV=/dev/null \
+                BASH_ENV= ENV= LD_PRELOAD= LD_LIBRARY_PATH= LD_AUDIT= \
+                PYTHONSTARTUP= PYTHONPATH= PYTHONHOME= \
+                NODE_OPTIONS= NODE_PATH= PERL5OPT= PERL5LIB= PERLLIB= \
+                RUBYOPT= RUBYLIB= GEM_HOME= GEM_PATH= \
+                GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+                GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 \
+                GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null \
+                /usr/bin/bash --noprofile --norc -eo pipefail "$0" __clean_reexec
+            ;;
+          esac
+
+      # Per-kind pipeline posting (ADR-0603): the stellar scripted path's
+      # hardening, generalized to the rust and security lanes — the model
+      # step ran with shell access, so nothing it left behind is trusted.
+      # The restore-and-harden choreography is review-restore.sh, the one
+      # spelling shared with the scripted post and the enforce gate,
+      # staged from trusted content (see the run block below). Facts
+      # and the kind's no-op gate are recomputed from git — the model
+      # had the whole run to rewrite .stellar, and its env publish
+      # channels are blanked, so the no-op gate is never trusted from
+      # the environment either.
+      - name: Post review (${{ inputs.job_name }})
+        if: always() && inputs.pipeline != 'scripted'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_KIND: ${{ inputs.review_kind }}
+          # The trusted reset target the helper requires: the merge SHA
+          # from the event payload, the commit this checkout started
+          # from — never local HEAD, which the model step could have
+          # moved with a commit.
+          RESTORE_SHA: ${{ github.sha }}
+          # gh's target host and the enforce gate's repo variable are
+          # pinned too (the round-22 finding): the model can append to
+          # the runner's env command file under RUNNER_TEMP (blanking
+          # GITHUB_ENV does not remove that file), and an unpinned
+          # GH_HOST sends this step's GH_TOKEN to a host of the model's
+          # choosing on every gh api call; an unpinned
+          # GITHUB_REPOSITORY points the enforce gate's verdict-comment
+          # read at any public repository holding a forged pass
+          # verdict. The enterprise token is blanked alongside
+          # (github.com auth comes from GH_TOKEN alone).
+          GH_HOST: github.com
+          GH_ENTERPRISE_TOKEN: ''
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Process-start pinning (see the header note): these fixed
+          # literals are the most specific Actions env scope, so they
+          # override anything the model shell published into the job —
+          # and they hold from process start, where review-restore.sh's
+          # in-script PATH pin (kept as defense-in-depth) is already
+          # too late for shell/loader startup.
+          BASH_ENV: ''
+          ENV: ''
+          # Bash startup-option and trace-prompt pins: bash applies the
+          # options named in SHELLOPTS (and BASHOPTS) from the
+          # environment at startup, and xtrace expands PS4 — with
+          # command substitution — for every traced command, so a
+          # model-published SHELLOPTS=xtrace plus PS4='$(…)' executes
+          # in this step's very first shell command, inside the shell
+          # that holds GH_TOKEN and before the env -i re-exec runs (the
+          # round-26 finding). The empty pins hold from process start;
+          # the re-exec's rebuilt environment never carries these names
+          # at all.
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          LD_AUDIT: ''
+          PYTHONSTARTUP: ''
+          PYTHONPATH: ''
+          PYTHONHOME: ''
+          NODE_OPTIONS: ''
+          NODE_PATH: ''
+          PERL5OPT: ''
+          PERL5LIB: ''
+          PERLLIB: ''
+          RUBYOPT: ''
+          RUBYLIB: ''
+          GEM_HOME: ''
+          GEM_PATH: ''
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          # Git configuration source pins (see the header note): the
+          # model step can write the shared HOME gitconfig and plant
+          # env-numbered config pairs through the runner env file —
+          # pinning every file source (global, system, env-numbered)
+          # makes model-written configuration inert from process
+          # start, before the staging git show below runs;
+          # review-restore.sh re-exports the same pins
+          # (defense-in-depth), replaces the repository's own .git/config
+          # with the minimal trusted configuration before its first git
+          # invocation, and pins its remaining knobs per git invocation.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_COUNT: '0'
+          # Replace objects are off from process start (the round-8
+          # finding): the model step can create refs/replace/<SHA>
+          # entries, and git resolves every SHA through them by
+          # default — the staging show below would stage
+          # attacker-crafted helper bytes and the reset would land on
+          # an attacker-crafted tree. The shows and the reset also
+          # carry --no-replace-objects per invocation; this env pin
+          # covers every other git call the step runs (the prep
+          # fetches, merge-base resolutions, facts recomputation).
+          GIT_NO_REPLACE_OBJECTS: '1'
+          # Grafts are pinned off from process start (the round-11
+          # finding): .git/info/grafts is model-writable and a graft
+          # parenting the base onto the head silently empties the
+          # merge-base the facts recomputation resolves. /dev/null is
+          # a fixed non-empty value git accepts as "no grafts".
+          GIT_GRAFT_FILE: /dev/null
+          # The timeout marker's channel is pinned to the runner's real
+          # temp directory (the round-19 finding): a model-published
+          # RUNNER_TEMP or TMPDIR would redirect both the wrapper's
+          # authoritative marker write and the restore's read to a
+          # model-chosen location. These are runner-provided values
+          # (never PR-controlled) and the step-env pin beats anything
+          # published through the runner env file.
+          RUNNER_TEMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          # Bash imports exported functions (BASH_FUNC_<name>%%
+          # environment variables) at startup — including anything the
+          # model step published through the runner's env command file
+          # (blanking GITHUB_ENV in the model step does not remove that
+          # file) — and an imported function shadows every command this
+          # step runs by name: PATH-resolved binaries and regular builtins
+          # alike (printf, jq, git), so the PATH pin and every per-name
+          # unset below cannot reach it (the round-23 finding). The
+          # runner's environment therefore never reaches the shell that
+          # holds the token: this script re-execs into a fresh bash under
+          # a rebuilt environment (env -i plus the pass-through list
+          # below) that carries no BASH_FUNC_ entry, no env-file residue,
+          # and the same fixed-value pins the step env spells. Every
+          # construct the unclean outer shell evaluates is one an imported
+          # function cannot intercept: case/esac are reserved words (bash
+          # rejects a function definition named for one), and /usr/bin/env
+          # and /usr/bin/bash contain a slash (bash bypasses function and
+          # builtin lookup for names with a slash). The clean shell is this
+          # same script ($0, the runner's temp file) with __clean_reexec as
+          # $1 — an argv position the env-file channel cannot forge; the
+          # body below runs only there.
+          case "${1:-}" in
+            __clean_reexec)
+          # Trusted-source the choreography (ADR-0603): the worktree
+          # copy is model-writable, so the committed PR-head copy — git
+          # show of the head SHA from the event payload, the reviewed
+          # PR tree (the prep step fetched the endpoints, so it
+          # resolves; a missing object fails this step closed) — is
+          # staged into a fresh mktemp file and sourced from there.
+          # The staging show carries the full per-invocation pin set —
+          # --no-replace-objects (a model-created refs/replace entry
+          # cannot steer which object the show reads) plus the config
+          # knobs: the step env pins the config file sources, but the
+          # repository's own .git/config still parses until the sourced
+          # choreography replaces it, and its worktree/filter/transport
+          # and fsmonitor/pager knobs are redirection or code execution.
+          # Env-channel hardening (round-11): the model step can write
+          # the runner env file, so git's location/transport variables
+          # and the proxy/CA channels are unset before this step's
+          # first git or gh use — unset (not an empty pin: git treats
+          # an empty GIT_DIR as a fatal error) and the hosted runners
+          # need no proxy. Covers the staging show below and everything
+          # the sourced choreography and the poster run in this shell.
+          unset GIT_WORK_TREE GIT_DIR GIT_INDEX_FILE GIT_EXEC_PATH \
+            GIT_CONFIG_PARAMETERS GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES \
+            GIT_COMMON_DIR GIT_NAMESPACE GIT_SHALLOW_FILE GIT_REPLACE_REF_BASE \
+            HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY \
+            https_proxy http_proxy all_proxy no_proxy \
+            SSL_CERT_FILE CURL_CA_BUNDLE \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO
+          # The staging show below reads the worktree's object store,
+          # which the model step could have subverted (the round-14
+          # finding): a gitdir: redirect file in .git's place serving a
+          # fake store, an injected alternates file adding an object
+          # source, or loose objects rewritten under a target's name —
+          # git does not content-verify loose objects on read. Three
+          # checks close the channel before anything is staged and
+          # sourced: .git must be a real directory, no alternates file
+          # may remain, and fsck verifies every object's content
+          # against its name.
+          if [ ! -d .git ]; then
+            echo "post: .git is not a directory (gitdir: redirect?) — refusing to stage" >&2
+            exit 1
+          fi
+          rm -f .git/objects/info/alternates
+          # A model-planted .git/commondir file redirects the object
+          # store (and refs/config resolution) to a directory of the
+          # model's choosing — sidestepping the alternates deletion and
+          # the fsck below, which both operate on .git itself (the
+          # round-19 finding). The runner's checkout has no commondir
+          # file (.git IS the common dir), so any present one is
+          # planted and removed.
+          rm -f .git/commondir
+          # fsck itself reads the repository config — still the
+          # model-written .git/config at this point, where
+          # fsck.badObjectSha1=ignore would suppress exactly the
+          # content-against-name check this guard exists to run (the
+          # round-19 finding). The pins force the check to error level
+          # regardless of what the config says, and neutralize
+          # fsck.skipList (the round-20 finding — the config could
+          # exempt chosen objects from the check): the empty string is
+          # NOT a valid unset here (git tries to open an object-name
+          # list at the empty path and dies: "could not open object
+          # name list"), so the list is pinned to /dev/null — an
+          # always-empty list on a root-owned device node the runner
+          # user can neither replace nor write.
+          git -c fsck.badObjectSha1=error -c fsck.skipList=/dev/null fsck --full --no-progress >/dev/null
+          RESTORE="$(mktemp)"
+          git --no-replace-objects -c core.fsmonitor= -c core.pager=cat -c core.worktree=. -c protocol.ext.allow=never -c core.attributesFile= -c core.hooksPath=/dev/null show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
+          # shellcheck disable=SC1090
+          . "$RESTORE" .stellar/findings.json
+          # Facts and the diff are recomputed from git — never from the
+          # .stellar documents the model step could have rewritten.
+          P=.github/scripts/opencode-review-post.py
+          # The no-op gate is the prep's last stdout line — the freshly
+          # computed facts piped straight into the gate — never a
+          # re-read of model-writable .stellar/facts.json between the
+          # trusted write and this decision.
+          GATE=$(.github/scripts/opencode-review-prep.sh post | tail -n 1)
+          if [ "$GATE" = "true" ]; then
+            python3 "$P" noop --kind "$REVIEW_KIND" --repo "$REPO" --pr "$PR_NUMBER"
+            exit 0
+          fi
+          # The findings-document gate is the poster's check subcommand —
+          # one implementation for the decision and the diagnosis, so a
+          # no-findings round names its cause.
+          VALID_MSG=$(python3 "$P" check --findings .stellar/findings.json 2>&1) && VALID=true || VALID=false
+          if [ "$TIMED_OUT" = "1" ]; then
+            # A killed run never greens the check: a single-shot review's
+            # completeness cannot be verified, so its findings document is
+            # not trusted for a verdict — the next push or re-run starts
+            # a fresh round.
+            python3 "$P" fail --kind "$REVIEW_KIND" --repo "$REPO" --pr "$PR_NUMBER" \
+              --reason "review timed out after ${{ inputs.review_timeout_minutes }} minutes — a killed run's findings document is not trusted for a verdict; the next push or re-run starts a fresh round"
+          elif [ "$VALID" = "true" ]; then
+            python3 "$P" post --kind "$REVIEW_KIND" --repo "$REPO" --pr "$PR_NUMBER" \
+              --head-sha "$HEAD_SHA" --findings .stellar/findings.json
+          else
+            python3 "$P" fail --kind "$REVIEW_KIND" --repo "$REPO" --pr "$PR_NUMBER" \
+              --reason "model run produced no valid .stellar/findings.json — $VALID_MSG"
+          fi
+            ;;
+            *)
+              /usr/bin/env -i \
+                PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                LANG=C.UTF-8 \
+                HOME="$HOME" RUNNER_TEMP="$RUNNER_TEMP" TMPDIR="$TMPDIR" \
+                GH_TOKEN="$GH_TOKEN" GH_HOST=github.com \
+                GH_ENTERPRISE_TOKEN= GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+              BASE_SHA="$BASE_SHA" HEAD_SHA="$HEAD_SHA" REPO="$REPO" \
+              PR_NUMBER="$PR_NUMBER" REVIEW_KIND="$REVIEW_KIND" \
+              RESTORE_SHA="$RESTORE_SHA" \
+                GITHUB_ENV=/dev/null \
+                BASH_ENV= ENV= LD_PRELOAD= LD_LIBRARY_PATH= LD_AUDIT= \
+                PYTHONSTARTUP= PYTHONPATH= PYTHONHOME= \
+                NODE_OPTIONS= NODE_PATH= PERL5OPT= PERL5LIB= PERLLIB= \
+                RUBYOPT= RUBYLIB= GEM_HOME= GEM_PATH= \
+                GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+                GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 \
+                GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null \
+                /usr/bin/bash --noprofile --norc -eo pipefail "$0" __clean_reexec
+            ;;
+          esac
 
       - name: Enforce verdict
         # Runs even if the review step fails: a failed review leaves no
         # verdict file and no summary comment, so the gate fails closed
-        # instead of skipping green on a dead runner. Scripted pipelines
-        # pin PATH and reset the tree first (the model step can poison
-        # both).
+        # instead of skipping green on a dead runner. Every pipeline ran
+        # a shell-capable model step, so the workspace is re-entered
+        # through the shared review-restore.sh first (pinned PATH,
+        # model-written git configuration neutralized, hooks off, reset
+        # to the event-payload merge SHA) —
+        # staged from trusted content like the two posts — with
+        # --no-clean: the verdict file is untracked and must survive.
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_KIND: ${{ inputs.review_kind }}
           VERDICT_FILE: ./.opencode-verdict.txt
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # The trusted owner/name review-restore.sh rebuilds the minimal
+          # replacement .git/config's origin URL from (the same
+          # workflow-expression value the two post steps pass) — the
+          # config the model shell could have written is never read back.
+          REPO: ${{ github.repository }}
+          # The trusted reset target the helper requires: the merge SHA
+          # from the event payload, the commit this checkout started
+          # from — never local HEAD, which the model step could have
+          # moved with a commit.
+          RESTORE_SHA: ${{ github.sha }}
+          # gh's target host and the enforce gate's repo variable are
+          # pinned too (the round-22 finding): the model can append to
+          # the runner's env command file under RUNNER_TEMP (blanking
+          # GITHUB_ENV does not remove that file), and an unpinned
+          # GH_HOST sends this step's GH_TOKEN to a host of the model's
+          # choosing on every gh api call; an unpinned
+          # GITHUB_REPOSITORY points the enforce gate's verdict-comment
+          # read at any public repository holding a forged pass
+          # verdict. The enterprise token is blanked alongside
+          # (github.com auth comes from GH_TOKEN alone).
+          GH_HOST: github.com
+          GH_ENTERPRISE_TOKEN: ''
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Process-start pinning (see the header note): these fixed
+          # literals are the most specific Actions env scope, so they
+          # override anything the model shell published into the job —
+          # and they hold from process start, where review-restore.sh's
+          # in-script PATH pin (kept as defense-in-depth) is already
+          # too late for shell/loader startup.
+          BASH_ENV: ''
+          ENV: ''
+          # Bash startup-option and trace-prompt pins: bash applies the
+          # options named in SHELLOPTS (and BASHOPTS) from the
+          # environment at startup, and xtrace expands PS4 — with
+          # command substitution — for every traced command, so a
+          # model-published SHELLOPTS=xtrace plus PS4='$(…)' executes
+          # in this step's very first shell command, inside the shell
+          # that holds GH_TOKEN and before the env -i re-exec runs (the
+          # round-26 finding). The empty pins hold from process start;
+          # the re-exec's rebuilt environment never carries these names
+          # at all.
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_LIBRARY_PATH: ''
+          LD_AUDIT: ''
+          PYTHONSTARTUP: ''
+          PYTHONPATH: ''
+          PYTHONHOME: ''
+          NODE_OPTIONS: ''
+          NODE_PATH: ''
+          PERL5OPT: ''
+          PERL5LIB: ''
+          PERLLIB: ''
+          RUBYOPT: ''
+          RUBYLIB: ''
+          GEM_HOME: ''
+          GEM_PATH: ''
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          # Git configuration source pins (see the header note): the
+          # model step can write the shared HOME gitconfig and plant
+          # env-numbered config pairs through the runner env file —
+          # pinning every file source (global, system, env-numbered)
+          # makes model-written configuration inert from process
+          # start, before the staging git show below runs;
+          # review-restore.sh re-exports the same pins
+          # (defense-in-depth), replaces the repository's own .git/config
+          # with the minimal trusted configuration before its first git
+          # invocation, and pins its remaining knobs per git invocation.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_COUNT: '0'
+          # Replace objects are off from process start (the round-8
+          # finding): the model step can create refs/replace/<SHA>
+          # entries, and git resolves every SHA through them by
+          # default — the staging show below would stage
+          # attacker-crafted helper bytes and the reset would land on
+          # an attacker-crafted tree. The shows and the reset also
+          # carry --no-replace-objects per invocation; this env pin
+          # covers every other git call the step runs (the prep
+          # fetches, merge-base resolutions, facts recomputation).
+          GIT_NO_REPLACE_OBJECTS: '1'
+          # Grafts are pinned off from process start (the round-11
+          # finding): .git/info/grafts is model-writable and a graft
+          # parenting the base onto the head silently empties the
+          # merge-base the facts recomputation resolves. /dev/null is
+          # a fixed non-empty value git accepts as "no grafts".
+          GIT_GRAFT_FILE: /dev/null
+          # The timeout marker's channel is pinned to the runner's real
+          # temp directory (the round-19 finding): a model-published
+          # RUNNER_TEMP or TMPDIR would redirect both the wrapper's
+          # authoritative marker write and the restore's read to a
+          # model-chosen location. These are runner-provided values
+          # (never PR-controlled) and the step-env pin beats anything
+          # published through the runner env file.
+          RUNNER_TEMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: |
-          if [ "${{ inputs.pipeline }}" = "scripted" ]; then
-            export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-            git config --unset core.hooksPath 2>/dev/null || true
-            git config --global core.hooksPath /dev/null
-            git reset --hard HEAD
+          # Bash imports exported functions (BASH_FUNC_<name>%%
+          # environment variables) at startup — including anything the
+          # model step published through the runner's env command file
+          # (blanking GITHUB_ENV in the model step does not remove that
+          # file) — and an imported function shadows every command this
+          # step runs by name: PATH-resolved binaries and regular builtins
+          # alike (printf, jq, git), so the PATH pin and every per-name
+          # unset below cannot reach it (the round-23 finding). The
+          # runner's environment therefore never reaches the shell that
+          # holds the token: this script re-execs into a fresh bash under
+          # a rebuilt environment (env -i plus the pass-through list
+          # below) that carries no BASH_FUNC_ entry, no env-file residue,
+          # and the same fixed-value pins the step env spells. Every
+          # construct the unclean outer shell evaluates is one an imported
+          # function cannot intercept: case/esac are reserved words (bash
+          # rejects a function definition named for one), and /usr/bin/env
+          # and /usr/bin/bash contain a slash (bash bypasses function and
+          # builtin lookup for names with a slash). The clean shell is this
+          # same script ($0, the runner's temp file) with __clean_reexec as
+          # $1 — an argv position the env-file channel cannot forge; the
+          # body below runs only there.
+          case "${1:-}" in
+            __clean_reexec)
+          # Trusted-source the choreography (ADR-0603): the worktree
+          # copy is model-writable, so the committed PR-head copy — git
+          # show of the head SHA from the event payload, the reviewed
+          # PR tree (the prep step fetched the endpoints, so it
+          # resolves; a missing object fails this step closed) — is
+          # staged into a fresh mktemp file and sourced from there.
+          # The staging show carries the full per-invocation pin set —
+          # --no-replace-objects (a model-created refs/replace entry
+          # cannot steer which object the show reads) plus the config
+          # knobs: the step env pins the config file sources, but the
+          # repository's own .git/config still parses until the sourced
+          # choreography replaces it, and its worktree/filter/transport
+          # and fsmonitor/pager knobs are redirection or code execution.
+          # Env-channel hardening (round-11): the model step can write
+          # the runner env file, so git's location/transport variables
+          # and the proxy/CA channels are unset before this step's
+          # first git or gh use — unset (not an empty pin: git treats
+          # an empty GIT_DIR as a fatal error) and the hosted runners
+          # need no proxy. Covers the staging show below and everything
+          # the sourced choreography and the poster run in this shell.
+          unset GIT_WORK_TREE GIT_DIR GIT_INDEX_FILE GIT_EXEC_PATH \
+            GIT_CONFIG_PARAMETERS GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES \
+            GIT_COMMON_DIR GIT_NAMESPACE GIT_SHALLOW_FILE GIT_REPLACE_REF_BASE \
+            HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY \
+            https_proxy http_proxy all_proxy no_proxy \
+            SSL_CERT_FILE CURL_CA_BUNDLE \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO
+          # The staging show below reads the worktree's object store,
+          # which the model step could have subverted (the round-14
+          # finding): a gitdir: redirect file in .git's place serving a
+          # fake store, an injected alternates file adding an object
+          # source, or loose objects rewritten under a target's name —
+          # git does not content-verify loose objects on read. Three
+          # checks close the channel before anything is staged and
+          # sourced: .git must be a real directory, no alternates file
+          # may remain, and fsck verifies every object's content
+          # against its name.
+          if [ ! -d .git ]; then
+            echo "post: .git is not a directory (gitdir: redirect?) — refusing to stage" >&2
+            exit 1
           fi
+          rm -f .git/objects/info/alternates
+          # A model-planted .git/commondir file redirects the object
+          # store (and refs/config resolution) to a directory of the
+          # model's choosing — sidestepping the alternates deletion and
+          # the fsck below, which both operate on .git itself (the
+          # round-19 finding). The runner's checkout has no commondir
+          # file (.git IS the common dir), so any present one is
+          # planted and removed.
+          rm -f .git/commondir
+          # fsck itself reads the repository config — still the
+          # model-written .git/config at this point, where
+          # fsck.badObjectSha1=ignore would suppress exactly the
+          # content-against-name check this guard exists to run (the
+          # round-19 finding). The pins force the check to error level
+          # regardless of what the config says, and neutralize
+          # fsck.skipList (the round-20 finding — the config could
+          # exempt chosen objects from the check): the empty string is
+          # NOT a valid unset here (git tries to open an object-name
+          # list at the empty path and dies: "could not open object
+          # name list"), so the list is pinned to /dev/null — an
+          # always-empty list on a root-owned device node the runner
+          # user can neither replace nor write.
+          git -c fsck.badObjectSha1=error -c fsck.skipList=/dev/null fsck --full --no-progress >/dev/null
+          RESTORE="$(mktemp)"
+          git --no-replace-objects -c core.fsmonitor= -c core.pager=cat -c core.worktree=. -c protocol.ext.allow=never -c core.attributesFile= -c core.hooksPath=/dev/null show "$HEAD_SHA:.github/scripts/review-restore.sh" > "$RESTORE"
+          # shellcheck disable=SC1090
+          . "$RESTORE" --no-clean
           .github/scripts/enforce-opencode-verdict.sh
+            ;;
+            *)
+              /usr/bin/env -i \
+                PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                LANG=C.UTF-8 \
+                HOME="$HOME" RUNNER_TEMP="$RUNNER_TEMP" TMPDIR="$TMPDIR" \
+                GH_TOKEN="$GH_TOKEN" GH_HOST=github.com \
+                GH_ENTERPRISE_TOKEN= GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+              PR_NUMBER="$PR_NUMBER" REVIEW_KIND="$REVIEW_KIND" \
+              VERDICT_FILE="$VERDICT_FILE" HEAD_SHA="$HEAD_SHA" REPO="$REPO" \
+              RESTORE_SHA="$RESTORE_SHA" \
+                GITHUB_ENV=/dev/null \
+                BASH_ENV= ENV= LD_PRELOAD= LD_LIBRARY_PATH= LD_AUDIT= \
+                PYTHONSTARTUP= PYTHONPATH= PYTHONHOME= \
+                NODE_OPTIONS= NODE_PATH= PERL5OPT= PERL5LIB= PERLLIB= \
+                RUBYOPT= RUBYLIB= GEM_HOME= GEM_PATH= \
+                GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+                GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 \
+                GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null \
+                /usr/bin/bash --noprofile --norc -eo pipefail "$0" __clean_reexec
+            ;;
+          esac
 
       # LABS-615/582: every round's raw documents survive the run even
       # when the posting path dies — the findings documents (full and
-      # partial), the verdict file, and the model lanes' staged summary
-      # (deleted by the model only AFTER a successful post, so it is
-      # captured here exactly when posting failed). A verdict-only or
-      # no-findings failure is then diagnosable from the run page
-      # instead of guessing from a red X.
+      # partial; the per-kind lanes write only the full document) and
+      # the verdict file. A verdict-only or no-findings failure is then
+      # diagnosable from the run page instead of guessing from a red X.
       - name: Preserve review outputs (artifact)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -387,6 +1252,5 @@ jobs:
             .stellar/findings.json
             .stellar/findings.partial.json
             .opencode-verdict.txt
-            .opencode-summary.md
           if-no-files-found: ignore
           retention-days: 14
