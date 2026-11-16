@@ -25,6 +25,7 @@ mod anchor;
 mod far_set;
 mod filters;
 mod guard;
+mod k_select;
 mod reach_cache;
 mod route;
 mod trail_walk;
@@ -65,6 +66,8 @@ mod expr_parity_tests;
 mod filters_tests;
 #[cfg(test)]
 mod fixtures;
+#[cfg(test)]
+mod k_tests;
 #[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
@@ -218,7 +221,9 @@ fn run_route<'a>(
     let Some(route) = Route::try_new(ctx, path, row, shape, &sink, reach) else {
         return Ok(false);
     };
-    route.run(&mut sink)?;
-    note_route_run();
-    Ok(true)
+    let taken = route.run(&mut sink)?;
+    if taken {
+        note_route_run();
+    }
+    Ok(taken)
 }

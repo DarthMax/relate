@@ -21,6 +21,7 @@ use super::anchor::{Anchor, Way};
 use super::far_set::FarSet;
 use super::filters::{PathFilter, RouteFilters};
 use super::guard::Shape;
+use super::k_select;
 use super::reach_cache::ReachCache;
 use super::trail_walk;
 
@@ -86,7 +87,7 @@ impl<'a> Route<'a> {
             dir: rel.direction,
             min: shape.min,
             max: shape.max.unwrap_or(u32::MAX),
-            all: shape.all,
+            all: shape.selection.all(),
             skip: None,
         };
         let route = Self {
@@ -101,6 +102,12 @@ impl<'a> Route<'a> {
             unbounded_cap: OnceCell::new(),
             path_rung: Cell::new(None),
         };
+        // A count selector under an inline predicate would have to pick its
+        // `k` among the trails that satisfy it; the length-class walk does
+        // not carry the predicate, so enumeration answers that shape.
+        if route.shape.selection.counted().is_some() && route.filters.path.is_some() {
+            return None;
+        }
         // A predicate the search cannot decide against the rows it binds
         // enumerates instead (see `predicates_decidable`).
         route
@@ -117,7 +124,7 @@ impl<'a> Route<'a> {
     /// DIFFERENT RELATIONSHIPS patterns (the admission fact's one home,
     /// `route_shape`), so the cap is that arm: the live rel count, the
     /// sound bound of a trail that never revisits a relationship.
-    fn memoized_unbounded_cap(&self) -> u32 {
+    pub(super) fn memoized_unbounded_cap(&self) -> u32 {
         *self
             .unbounded_cap
             .get_or_init(|| unbounded_dfs_cap(self.ctx.graph, MatchMode::DifferentRelationships))
@@ -130,11 +137,19 @@ impl<'a> Route<'a> {
     /// ([`Route::try_new`]), never the run's: once a route exists, every
     /// row it binds is pushed. The run stops early once the sink is
     /// halted.
-    pub(super) fn run(&self, out: &mut MatchedSink<'_, '_>) -> Result<()> {
+    pub(super) fn run(&self, out: &mut MatchedSink<'_, '_>) -> Result<bool> {
         if self.search.min > self.search.max {
-            return Ok(());
+            return Ok(true);
         }
-        let anchor = self.anchor()?;
+        let Some(anchor) = self.anchor()? else {
+            return Ok(false);
+        };
+        // The length-class walk answers a pair partition; a fan has one
+        // end open and keeps enumeration (ADR-0607). The decline happens
+        // here, after the anchor resolves and before any row is pushed.
+        if self.shape.selection.counted().is_some() && matches!(anchor, Anchor::Fan { .. }) {
+            return Ok(false);
+        }
         #[cfg(test)]
         super::anchor::note_anchor(anchor.arm());
         match anchor {
@@ -150,7 +165,7 @@ impl<'a> Route<'a> {
                 self.each_start(|s| self.pair_partition(s, s, out))?;
             }
         };
-        Ok(())
+        Ok(true)
     }
 
     /// Whether the search can decide every predicate it must evaluate, against
@@ -362,6 +377,9 @@ impl<'a> Route<'a> {
         }
         if self.filters.path.is_some() {
             return self.feasible_partition(s, e, srow, out);
+        }
+        if let Some(keep) = self.shape.selection.counted() {
+            return k_select::select_k(self, (s, e), srow, keep, out);
         }
         let trails = if s != e {
             trails()?
