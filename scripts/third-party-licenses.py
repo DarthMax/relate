@@ -218,8 +218,11 @@ def cmd_policy(args):
     for manifest_dir in SHIPPED:
         r = run(
             [
+                # dev crates never ship (shipped-license policy); per-invocation
+                # — a config-file exclusion would narrow the advisories scan —
+                # see deny.toml's no-[graph] note for the full rationale.
                 "cargo", "deny", "--manifest-path", f"{manifest_dir}/Cargo.toml",
-                "--config", "deny.toml", "check", "licenses",
+                "--config", "deny.toml", "--exclude-dev", "check", "licenses",
             ]
         )
         if r.returncode == 0:
