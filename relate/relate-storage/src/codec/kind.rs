@@ -19,6 +19,9 @@ pub enum SnapshotCodecKind {
     /// EXPERIMENTAL (default off, `rkyv-codec`): one zero-copy rkyv
     /// archive. Measurement only until an ADR promotes it.
     Rkyv,
+    /// POC (default off, `gds-codec`): a read-only Neo4j GDS Arrow
+    /// export (`graph.arrow`), loaded at open, never written.
+    Gds,
 }
 
 impl Default for SnapshotCodecKind {
@@ -36,7 +39,13 @@ impl SnapshotCodecKind {
     /// compile-forced arm in each layout fact ([`Self::wal_dir`],
     /// [`Self::checkpoint_image`], [`Self::engine_dir`],
     /// [`Self::feature_name`]).
-    const ALL: [Self; 4] = [Self::Parquet, Self::Json, Self::Markdown, Self::Rkyv];
+    const ALL: [Self; 5] = [
+        Self::Parquet,
+        Self::Json,
+        Self::Markdown,
+        Self::Rkyv,
+        Self::Gds,
+    ];
 
     /// Whether this codec is compiled into the build. JSON always is;
     /// Parquet needs the `parquet` feature on a non-wasm32 target (ADR-0105).
@@ -54,6 +63,7 @@ impl SnapshotCodecKind {
         match self {
             Self::Parquet => cfg!(parquet_codec),
             Self::Rkyv => cfg!(rkyv_codec),
+            Self::Gds => cfg!(gds_codec),
             Self::Json | Self::Markdown => true,
         }
     }
@@ -66,8 +76,15 @@ impl SnapshotCodecKind {
         match self {
             Self::Parquet => "parquet",
             Self::Rkyv => "rkyv-codec",
+            Self::Gds => "gds-codec",
             Self::Json | Self::Markdown => "",
         }
+    }
+
+    /// Whether stores of this codec are only ever read: a GDS export is
+    /// loaded at open and never checkpointed.
+    pub const fn is_read_only(self) -> bool {
+        matches!(self, Self::Gds)
     }
 
     /// The compiled codecs whose engine state lives at the store root —
@@ -81,7 +98,9 @@ impl SnapshotCodecKind {
             .filter(|codec| codec.engine_dir().is_none())
     }
 
-    /// Every codec compiled into the build, the new-store default first.
+    /// Every codec compiled into the build that a store can be created
+    /// and checkpointed in, the new-store default first. Read-only codecs
+    /// ([`Self::is_read_only`]) are compiled but not listed.
     ///
     /// # Example
     /// ```
@@ -101,7 +120,7 @@ impl SnapshotCodecKind {
             Self::ALL
                 .iter()
                 .copied()
-                .filter(|kind| kind.is_compiled())
+                .filter(|kind| kind.is_compiled() && !kind.is_read_only())
                 .collect()
         })
     }
@@ -127,7 +146,7 @@ impl SnapshotCodecKind {
     /// vault's own files (ADR-0406 §3).
     pub const fn wal_dir(self) -> &'static str {
         match self {
-            Self::Parquet | Self::Json | Self::Rkyv => "wal",
+            Self::Parquet | Self::Json | Self::Rkyv | Self::Gds => "wal",
             Self::Markdown => super::markdown::WAL_DIR,
         }
     }
@@ -145,6 +164,7 @@ impl SnapshotCodecKind {
             Self::Parquet | Self::Rkyv => crate::snapshot::MANIFEST_JSON,
             Self::Json => super::json::GRAPH_JSON,
             Self::Markdown => super::markdown::MANIFEST,
+            Self::Gds => super::gds::GRAPH_ARROW,
         }
     }
 
@@ -158,6 +178,7 @@ impl SnapshotCodecKind {
             Self::Json => &[crate::snapshot::MANIFEST_JSON, super::json::GRAPH_JSON],
             Self::Rkyv => &[crate::snapshot::MANIFEST_JSON, super::GRAPH_RKYV],
             Self::Markdown => &[super::markdown::MANIFEST],
+            Self::Gds => &[super::gds::GRAPH_ARROW],
         }
     }
 
@@ -170,7 +191,7 @@ impl SnapshotCodecKind {
     pub const fn engine_dir(self) -> Option<&'static str> {
         match self {
             Self::Markdown => Some(super::markdown::ENGINE_DIR),
-            Self::Parquet | Self::Json | Self::Rkyv => None,
+            Self::Parquet | Self::Json | Self::Rkyv | Self::Gds => None,
         }
     }
 
@@ -208,6 +229,7 @@ impl SnapshotCodecKind {
             Self::Json => "json",
             Self::Markdown => "markdown",
             Self::Rkyv => "rkyv",
+            Self::Gds => "gds",
         }
     }
 

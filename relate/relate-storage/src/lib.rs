@@ -23,6 +23,9 @@ pub use native_ownership::{take_writer_lease, WriterLease};
 pub use native_ownership::{LOCK_MARKER, ROOT_ROLE, WAL_ROLE, WRITER_LEASE};
 use relate_core::{Error, Result};
 
+#[cfg(gds_codec)]
+#[doc(hidden)]
+pub use codec::gds::fixture as gds_fixture;
 pub use codec::markdown::recorded_body_properties;
 pub use codec::markdown::MarkdownBodyProperties;
 pub use codec::open_config::CodecOpenConfig;
@@ -304,6 +307,15 @@ fn parse_filesystem_uri(
         // covers a mismatched configuration (a created-exclusive bundle
         // is removed by the publish path's cleanup).
         return install_config(target, config);
+    }
+    if codec::gds::is_export_dir(&path) {
+        return codec::gds::export_target(
+            &path,
+            requested,
+            mode == OpenMode::ReadOnly,
+            wal_dir,
+            config.as_ref(),
+        );
     }
     // A markdown store's engine state lives under `.cypherlite/`
     // (ADR-0406 §3), so its default WAL is `<vault>/.cypherlite/wal`.

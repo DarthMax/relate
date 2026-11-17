@@ -84,6 +84,12 @@ pub(crate) fn codec_ops(codec: SnapshotCodecKind) -> CodecOps {
             dump: codec::rkyv::dump,
             snapshot_data_bytes: codec::rkyv::snapshot_data_bytes,
         },
+        SnapshotCodecKind::Gds => CodecOps {
+            finish_open: admit_every_replay,
+            sweep_after_open: nothing_to_sweep,
+            dump: codec::gds::dump,
+            snapshot_data_bytes: codec::gds::snapshot_data_bytes,
+        },
     }
 }
 
@@ -113,6 +119,7 @@ fn load_with_checkpoint_lsn<G: SnapshotGraph>(target: &StoreTarget) -> Result<Lo
         SnapshotCodecKind::Json => codec::json::load_with_checkpoint_lsn::<G>(target),
         SnapshotCodecKind::Markdown => codec::markdown::load_with_checkpoint_lsn::<G>(target),
         SnapshotCodecKind::Rkyv => codec::rkyv::load_with_checkpoint_lsn::<G>(target),
+        SnapshotCodecKind::Gds => codec::gds::load_with_checkpoint_lsn::<G>(target),
     }
 }
 
@@ -194,6 +201,12 @@ pub fn open_store_readonly<G: SnapshotGraph>(target: &StoreTarget) -> Result<(G,
 pub fn open_store_readonly_with_ontology<G: SnapshotGraph>(
     target: &StoreTarget,
 ) -> Result<(G, Wal, Option<String>)> {
+    // A read-only codec's source is never checkpointed, so no concurrent
+    // writer can move its image during the load; stamping it would only
+    // re-read the whole image twice.
+    if target.codec.is_read_only() {
+        return open_store_readonly_once(target);
+    }
     const ATTEMPTS: u32 = 8;
     let mut last_err = None;
     for attempt in 0..ATTEMPTS {

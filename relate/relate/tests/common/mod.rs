@@ -785,6 +785,9 @@ pub fn assert_checkpoint_format(
             assert_eq!(image["has_ontology"], held);
             assert_ontology(None, ExpectedOntology::Absent);
         }
+        relate_storage::SnapshotCodecKind::Gds => {
+            unreachable!("a GDS export is read-only and never publishes a checkpoint image")
+        }
     }
 }
 

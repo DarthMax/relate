@@ -18,6 +18,9 @@ parquet = ["dep:arrow", "dep:parquet", "dep:bytes"]
 # needs no unchecked access; `unaligned` lets the archive sit in a plain
 # byte buffer (ADR-0537).
 rkyv-codec = ["dep:rkyv", "dep:lz4_flex", "dep:indexmap"]
+# POC, default off: a read-only codec over a Neo4j GDS Arrow export
+# (`graph.arrow`), loaded into the in-memory graph at open.
+gds-codec = ["dep:arrow", "arrow/ipc"]
 [dependencies]
 relate-catalog = { workspace = true }
 relate-core = { workspace = true }

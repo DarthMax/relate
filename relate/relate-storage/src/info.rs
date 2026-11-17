@@ -226,6 +226,9 @@ fn read_snapshot(target: &StoreTarget) -> Result<StoreSnapshot> {
         // fail-closed belt if that invariant ever breaks.
         SnapshotCodecKind::Markdown => Err(codec::root_envelope_names_markdown()),
         SnapshotCodecKind::Parquet => parquet_snapshot(target),
+        SnapshotCodecKind::Gds => Err(Error::storage(
+            "a root envelope never names the gds codec: GDS exports carry no envelope",
+        )),
     }
 }
 

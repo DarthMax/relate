@@ -104,6 +104,8 @@ fetch-params = ["http-fetch"]
 # without the feature.
 remote-database = ["http-fetch", "staging"]
 parquet = ["relate/parquet"]
+# POC, default off: open Neo4j GDS Arrow exports read-only.
+gds-codec = ["relate/gds-codec"]
 # `relate info` cold store-metadata read (ADR-0165). `full` + `agent`.
 info = []
 # `relate serve` itself: no code of its own beyond the command; every

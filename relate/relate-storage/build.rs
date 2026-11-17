@@ -5,11 +5,15 @@ fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     let wasm = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "wasm32");
     let mut manifest_codec = false;
-    for (feature, cfg) in [("PARQUET", "parquet_codec"), ("RKYV_CODEC", "rkyv_codec")] {
+    for (feature, cfg, writes_manifest) in [
+        ("PARQUET", "parquet_codec", true),
+        ("RKYV_CODEC", "rkyv_codec", true),
+        ("GDS_CODEC", "gds_codec", false),
+    ] {
         println!("cargo::rustc-check-cfg=cfg({cfg})");
         if std::env::var_os(format!("CARGO_FEATURE_{feature}")).is_some() && !wasm {
             println!("cargo::rustc-cfg={cfg}");
-            manifest_codec = true;
+            manifest_codec |= writes_manifest;
         }
     }
     // One derived cfg for "some manifest-bearing codec is compiled", so the

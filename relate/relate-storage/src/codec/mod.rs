@@ -15,6 +15,7 @@ pub(crate) use experimental::{
     assemble_loaded, checkpoint_identity_mismatch, content_encoding, publication_failure,
     read_codec_manifest, restore_object, write_codec_manifest,
 };
+pub(crate) mod gds;
 pub mod json;
 mod kind;
 pub(crate) mod markdown;

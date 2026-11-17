@@ -14,6 +14,8 @@ default = ["parquet"]
 parquet = ["relate-storage/parquet"]
 # EXPERIMENTAL codec (ADR-0105's additive-feature rule); default off.
 rkyv-codec = ["relate-storage/rkyv-codec"]
+# POC, default off: read-only Neo4j GDS Arrow exports.
+gds-codec = ["relate-storage/gds-codec"]
 # Research-only speed-of-light kernels: forwards the executor's
 # quarantine feature (ADR-0476). Non-default: the `sol` re-export and
 # `Database::sol_graph` compile only under it. The `qpp` re-export
