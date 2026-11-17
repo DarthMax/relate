@@ -11,6 +11,7 @@ mod catalog_image;
 mod commit;
 mod engines;
 mod export;
+mod frozen;
 mod query;
 mod write;
 
@@ -22,6 +23,7 @@ pub use engines::{
     EngineIds, QueryEngineId, WriteEngineId, LOCAL_WRITE_ENGINE, MEMORY_QUERY_ENGINE,
 };
 pub use export::{GraphExport, GraphImport, SnapshotGraph};
+pub use frozen::{decode_targets, encode_targets, FrozenRelType, FrozenRelTypeParts, Targets};
 pub use graph_type::{canonical_default_clause, DefaultValue, GraphTypeSpec};
 pub use query::{QueryEngine, ReadRequest, WriteRequest};
 pub use redo::{

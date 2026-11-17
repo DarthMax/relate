@@ -16,8 +16,8 @@ use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use serde_json::{json, Value as Json};
 
-use super::decode::encode_targets;
 use super::GRAPH_ARROW;
+use relate_engine_api::encode_targets;
 
 /// One node property column, one entry per node.
 pub enum PropertyColumn {

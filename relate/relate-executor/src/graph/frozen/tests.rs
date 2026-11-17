@@ -1,8 +1,9 @@
 use relate_core::{Error, NodeId};
 use relate_ir::Direction;
 
-use super::build::{encode_targets, targets_of};
-use super::{FrozenRelType, FrozenTopology};
+use relate_engine_api::{encode_targets, FrozenRelType};
+
+use super::FrozenTopology;
 use crate::graph::Graph;
 use crate::store::RelTypes;
 
@@ -25,13 +26,6 @@ fn hops(t: &FrozenTopology, node: NodeId, dir: Direction) -> Vec<(i64, NodeId)> 
     })
     .unwrap();
     out
-}
-
-#[test]
-fn targets_decode_across_multi_byte_deltas_and_parallel_edges() {
-    let targets = [0, 2, 2, 3, 200, 70_000, 1 << 40];
-    assert_eq!(targets_of(&encode_targets(&targets)), targets);
-    assert_eq!(encode_targets(&[1, 3]), vec![0x81, 0x82]);
 }
 
 #[test]
@@ -72,24 +66,16 @@ fn ids_follow_type_then_source_then_position_across_word_boundaries() {
 }
 
 #[test]
-fn malformed_input_is_refused() {
-    let storage = |r: relate_core::Result<()>| matches!(r, Err(Error::Storage(_)));
-    let mut t = FrozenRelType::new("A", vec!["w".into()]);
-    assert!(storage(t.push(0, &[0x01], &[&[]])));
-    assert!(storage(t.push(0, &[0x00; 10], &[&[]])));
-    assert!(storage(t.push(0, &[0x81], &[])));
-    assert!(storage(t.push(0, &[0x81], &[&[1.0, 2.0]])));
-    assert!(storage(t.push(-1, &[0x81], &[&[1.0]])));
-    t.push(5, &[0x81], &[&[1.0]]).unwrap();
-    assert!(storage(t.push(5, &[0x81], &[&[1.0]])));
-    assert!(storage(t.push(4, &[0x81], &[&[1.0]])));
-
+fn nodes_outside_the_bound_and_repeated_types_are_refused() {
     let list = |source, target| {
         let mut t = FrozenRelType::new("A", vec![]);
         t.push(source, &encode_targets(&[target]), &[]).unwrap();
         t
     };
-    assert!(graph(10, vec![list(0, 10)]).is_err());
+    assert!(matches!(
+        graph(10, vec![list(0, 10)]),
+        Err(Error::Storage(_))
+    ));
     assert!(graph(10, vec![list(10, 0)]).is_err());
     assert!(graph(10, vec![list(0, 1), list(1, 2)]).is_err());
     assert!(graph(10, vec![list(9, 9)]).is_ok());

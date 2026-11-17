@@ -67,8 +67,6 @@ mod label_probe;
 mod pin;
 mod prop_read;
 mod query_stats;
-#[doc(hidden)]
-pub use frozen::FrozenRelType;
 pub use pin::SnapshotPin;
 #[cfg(test)]
 use pin::PIN_ACQUIRE_RETRIES;
@@ -628,6 +626,7 @@ impl Graph {
         if write_ts == u64::MAX {
             return Err(relate_core::Error::execution("write timestamp exhausted"));
         }
+        self.check_not_frozen()?;
         self.in_write.store(true, Ordering::Release);
         self.write_ts.store(write_ts, Ordering::Release);
         self.pending_redo.lock().unwrap().clear();

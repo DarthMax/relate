@@ -6,7 +6,6 @@
 //! untouched.
 
 #[cfg(gds_codec)]
-mod decode;
 #[cfg(gds_codec)]
 #[doc(hidden)]
 pub mod fixture;
@@ -92,7 +91,7 @@ pub(crate) fn load_with_checkpoint_lsn<G: relate_engine_api::SnapshotGraph>(
     let bytes = crate::snapshot::get_object_opt(target, GRAPH_ARROW)?
         .ok_or_else(|| Error::storage(format!("GDS Arrow store has no {GRAPH_ARROW}")))?;
     Ok(LoadedSnapshot {
-        graph: load::load_graph(bytes)?,
+        graph: load::load_graph(bytes, load::Topology::from_env()?)?,
         checkpoint_lsn: 0,
         ontology: None,
         marker: crate::version::SnapshotMarker::Current,

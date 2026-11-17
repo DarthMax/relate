@@ -16,6 +16,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use relate_core::{NodeId, PropertyMap, RelId, Relationship, Value};
+use relate_engine_api::Targets;
 use relate_ir::Direction;
 
 use super::RelRow;
@@ -24,10 +25,6 @@ use crate::store::{empty_properties, RelTypes};
 mod build;
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-pub(super) use build::encode_targets;
-pub use build::FrozenRelType;
 
 pub(super) struct FrozenTopology {
     /// Ascending by `base`.
@@ -76,32 +73,6 @@ struct InLists {
     rels: Vec<u32>,
 }
 
-/// Absolute targets of one validated varlong stream.
-struct Targets<'a> {
-    bytes: &'a [u8],
-    prev: i64,
-}
-
-impl Iterator for Targets<'_> {
-    type Item = NodeId;
-
-    fn next(&mut self) -> Option<NodeId> {
-        let mut delta = 0u64;
-        let mut shift = 0u32;
-        loop {
-            let (&byte, rest) = self.bytes.split_first()?;
-            self.bytes = rest;
-            delta |= u64::from(byte & 0x7F) << shift;
-            if byte & 0x80 != 0 {
-                break;
-            }
-            shift += 7;
-        }
-        self.prev += delta as i64;
-        Some(self.prev)
-    }
-}
-
 impl std::fmt::Debug for FrozenTopology {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrozenTopology")
@@ -123,10 +94,7 @@ impl Present {
 
 impl OutLists {
     fn targets(&self, slot: usize) -> Targets<'_> {
-        Targets {
-            bytes: &self.bytes[self.offsets[slot] as usize..self.offsets[slot + 1] as usize],
-            prev: 0,
-        }
+        Targets::new(&self.bytes[self.offsets[slot] as usize..self.offsets[slot + 1] as usize])
     }
 
     fn degree(&self, node: NodeId) -> usize {

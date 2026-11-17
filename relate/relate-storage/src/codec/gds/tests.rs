@@ -183,3 +183,26 @@ fn empty_graph_without_labels_loads() {
     let graph = open(dir.path());
     assert!(graph.all_node_ids_at(graph.commit_ts()).is_empty());
 }
+
+#[test]
+fn frozen_and_materialized_loads_hold_the_same_relationships() {
+    use super::load::{load_graph, Topology};
+    for batch_size in [1, 2, 100] {
+        let dir = tempfile::tempdir().unwrap();
+        export().write(dir.path(), batch_size);
+        let bytes = std::fs::read(dir.path().join(super::GRAPH_ARROW)).unwrap();
+        let frozen: Graph = load_graph(bytes.clone(), Topology::Frozen).unwrap();
+        let materialized: Graph = load_graph(bytes, Topology::Materialized).unwrap();
+        assert_eq!(
+            rels(&frozen),
+            rels(&materialized),
+            "batch size {batch_size}"
+        );
+        assert_eq!(rels(&frozen).len(), 5);
+        assert_eq!(frozen.next_rel_id(), materialized.next_rel_id());
+        for node in 0..3 {
+            assert_eq!(frozen.degree_out(node), materialized.degree_out(node));
+            assert_eq!(frozen.degree_in(node), materialized.degree_in(node));
+        }
+    }
+}

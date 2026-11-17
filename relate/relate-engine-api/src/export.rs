@@ -8,6 +8,7 @@ use relate_core::{Node, NodeId, RelId, Relationship, Result};
 use relate_model::Constraint;
 
 use crate::catalog_image::CheckpointTheater;
+use crate::frozen::FrozenRelType;
 use crate::redo::RedoOp;
 
 pub trait GraphExport {
@@ -43,6 +44,11 @@ pub trait GraphImport: GraphExport {
     fn finish_restore(&self);
     fn load_checkpoint_node(&self, node: Node) -> Result<()>;
     fn load_checkpoint_rel(&self, rel: Relationship) -> Result<()>;
+    /// Take every relationship as target lists, after the last node and
+    /// instead of any `load_checkpoint_rel`. Relationship ids run from 0 in
+    /// the order of `types`, then by source, then by position in the list.
+    /// The graph is read-only from then on.
+    fn install_frozen_topology(&self, types: Vec<FrozenRelType>) -> Result<()>;
     fn apply_replayed_redo(&self, ops: Vec<RedoOp>, commit_ts: u64) -> Result<()>;
     fn rebuild_indexes(&self);
     fn restore_graph_type_spec(&self, spec: Option<&str>) -> Result<()>;

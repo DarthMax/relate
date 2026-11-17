@@ -25,9 +25,8 @@ use arrow::datatypes::DataType;
 use arrow::ipc::reader::FileReader;
 use arrow::record_batch::RecordBatch;
 use relate_core::{Error, Node, PropertyMap, Relationship, Result, Value};
-use relate_engine_api::SnapshotGraph;
+use relate_engine_api::{decode_targets, encode_targets, FrozenRelType, SnapshotGraph};
 
-use super::decode::decode_targets;
 use super::metadata::{self, Direction, GraphStoreMetadata, RelationshipSchemaEntry, ValueType};
 use crate::codec::catalog::{self, CatalogWire};
 
@@ -42,7 +41,31 @@ fn arrow_err(e: arrow::error::ArrowError) -> Error {
     Error::storage(format!("GDS Arrow graph: {e}"))
 }
 
-pub(super) fn load_graph<G: SnapshotGraph>(bytes: Vec<u8>) -> Result<G> {
+/// How the export's relationships reach the graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Topology {
+    /// The adjacency lists, read in place by the engine.
+    Frozen,
+    /// One relationship row per target, adjacency rebuilt by the engine.
+    Materialized,
+}
+
+impl Topology {
+    /// `RELATE_GDS_TOPOLOGY`, a diagnostic switch: unset, empty or `frozen`
+    /// selects [`Topology::Frozen`], `materialized` the row-per-relationship
+    /// load it is compared against.
+    pub(super) fn from_env() -> Result<Self> {
+        match std::env::var("RELATE_GDS_TOPOLOGY").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("" | "frozen") => Ok(Self::Frozen),
+            Ok("materialized") => Ok(Self::Materialized),
+            other => Err(Error::storage(format!(
+                "RELATE_GDS_TOPOLOGY must be 'frozen' or 'materialized', not {other:?}"
+            ))),
+        }
+    }
+}
+
+pub(super) fn load_graph<G: SnapshotGraph>(bytes: Vec<u8>, topology: Topology) -> Result<G> {
     let reader = FileReader::try_new(Cursor::new(bytes), None).map_err(arrow_err)?;
     let meta = metadata::parse(reader.schema().metadata())?;
     let batches: Vec<RecordBatch> = reader
@@ -70,11 +93,26 @@ pub(super) fn load_graph<G: SnapshotGraph>(bytes: Vec<u8>) -> Result<G> {
         )));
     }
     let mut next_rel_id = 0i64;
+    let mut frozen = Vec::new();
     for (rel_type, entry) in &meta.relationship_schema {
+        let keys = entry.property_schemas.keys().cloned().collect();
+        let mut lists = FrozenRelType::new(rel_type.as_str(), keys);
         for batch in &batches {
             let rels = RelColumns::resolve(batch, rel_type, entry)?;
-            load_rels(&graph, batch, &rels, node_count, &mut next_rel_id)?;
+            match topology {
+                Topology::Frozen => freeze_rels(&mut lists, batch, &rels)?,
+                Topology::Materialized => {
+                    load_rels(&graph, batch, &rels, node_count, &mut next_rel_id)?;
+                }
+            }
         }
+        frozen.push(lists);
+    }
+    if topology == Topology::Frozen {
+        let count: u64 = frozen.iter().map(FrozenRelType::rel_count).sum();
+        next_rel_id = i64::try_from(count)
+            .map_err(|_| Error::storage("GDS relationship count exceeds the id range"))?;
+        graph.install_frozen_topology(frozen)?;
     }
     drop(batches);
     graph.set_next_rel_id(next_rel_id);
@@ -290,25 +328,15 @@ fn load_rels<G: SnapshotGraph>(
                 Ok((*key, values))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut self_loops = 0usize;
+        let mut kept = undirected_copies(rels.direction, source);
         for (pos, &target) in targets.iter().enumerate() {
             if !(0..node_count).contains(&target) {
                 return Err(Error::storage(format!(
                     "GDS relationship target {target} outside 0..{node_count}"
                 )));
             }
-            if rels.direction == Direction::Undirected {
-                let keep = match target.cmp(&source) {
-                    std::cmp::Ordering::Less => false,
-                    std::cmp::Ordering::Greater => true,
-                    std::cmp::Ordering::Equal => {
-                        self_loops += 1;
-                        self_loops % 2 == 1
-                    }
-                };
-                if !keep {
-                    continue;
-                }
+            if !kept(target) {
+                continue;
             }
             let properties: BTreeMap<String, Value> = weights
                 .iter()
@@ -327,6 +355,91 @@ fn load_rels<G: SnapshotGraph>(
                 properties: PropertyMap::share(properties),
             })?;
             *next_rel_id += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Which targets of `source`'s list become relationships. An undirected
+/// type lists every edge at both endpoints: the copy pointing at a larger
+/// node id is kept, and every second copy of a self-loop.
+fn undirected_copies(direction: Direction, source: i64) -> impl FnMut(i64) -> bool {
+    let mut self_loops = 0usize;
+    move |target| {
+        if direction != Direction::Undirected {
+            return true;
+        }
+        match target.cmp(&source) {
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => {
+                self_loops += 1;
+                self_loops % 2 == 1
+            }
+        }
+    }
+}
+
+/// Push one batch's lists of a type as they are; an undirected list is
+/// re-encoded from the copies [`undirected_copies`] keeps.
+fn freeze_rels(
+    lists: &mut FrozenRelType,
+    batch: &RecordBatch,
+    rels: &RelColumns<'_>,
+) -> Result<()> {
+    let node_ids = column::<Int64Array>(batch, NODE_ID_COLUMN)?;
+    let mut weights: Vec<Vec<f64>> = vec![Vec::new(); rels.properties.len()];
+    for row in 0..batch.num_rows() {
+        if rels.adjacency.is_null(row) {
+            continue;
+        }
+        let source = node_ids.value(row);
+        let encoded = rels.adjacency.value(row);
+        let kept: Option<(Vec<i64>, Vec<bool>)> = match rels.direction {
+            Direction::Undirected => {
+                let targets = decode_targets(encoded)?;
+                let keep = targets
+                    .iter()
+                    .map(|target| *target)
+                    .map(undirected_copies(rels.direction, source))
+                    .collect();
+                Some((targets, keep))
+            }
+            Direction::Directed => None,
+        };
+        for (out, (_, column, name)) in weights.iter_mut().zip(&rels.properties) {
+            let values = column.value(row);
+            let values = downcast::<Int64Array>(&values, name)?;
+            let bits = values
+                .values()
+                .iter()
+                .map(|bits| f64::from_bits(*bits as u64));
+            out.clear();
+            match &kept {
+                None => out.extend(bits),
+                Some((_, keep)) if keep.len() == values.len() => {
+                    out.extend(bits.zip(keep).filter_map(|(v, keep)| keep.then_some(v)));
+                }
+                Some((targets, _)) => {
+                    return Err(Error::storage(format!(
+                        "GDS column '{name}' has {} values for node {source} of degree {}",
+                        values.len(),
+                        targets.len()
+                    )));
+                }
+            }
+        }
+        let weights: Vec<&[f64]> = weights.iter().map(Vec::as_slice).collect();
+        match kept {
+            None => lists.push(source, encoded, &weights)?,
+            Some((targets, keep)) => {
+                let targets: Vec<i64> = targets
+                    .into_iter()
+                    .zip(keep)
+                    .filter_map(|(target, keep)| keep.then_some(target))
+                    .collect();
+                lists.push(source, &encode_targets(&targets), &weights)?;
+            }
         }
     }
     Ok(())

@@ -217,6 +217,9 @@ impl GraphImport for InMemoryQueryEngine {
     fn load_checkpoint_rel(&self, rel: relate_core::Relationship) -> Result<()> {
         Graph::load_checkpoint_rel(&self.graph, rel)
     }
+    fn install_frozen_topology(&self, types: Vec<relate_engine_api::FrozenRelType>) -> Result<()> {
+        Graph::install_frozen_topology(&self.graph, types)
+    }
     fn apply_replayed_redo(&self, ops: Vec<RedoOp>, commit_ts: u64) -> Result<()> {
         Graph::apply_replayed_redo(&self.graph, ops, commit_ts)
     }

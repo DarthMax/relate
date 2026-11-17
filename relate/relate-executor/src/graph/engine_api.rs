@@ -97,6 +97,9 @@ impl GraphImport for Graph {
     fn load_checkpoint_rel(&self, rel: Relationship) -> Result<()> {
         Graph::load_checkpoint_rel(self, rel)
     }
+    fn install_frozen_topology(&self, types: Vec<relate_engine_api::FrozenRelType>) -> Result<()> {
+        Graph::install_frozen_topology(self, types)
+    }
     fn apply_replayed_redo(&self, ops: Vec<RedoOp>, commit_ts: u64) -> Result<()> {
         Graph::apply_replayed_redo(self, ops, commit_ts)
     }

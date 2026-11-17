@@ -25,6 +25,7 @@ impl Graph {
         } else {
             false
         };
+        self.check_not_frozen()?;
         self.in_write.store(true, Ordering::Release);
         self.write_ts.store(commit_ts, Ordering::Release);
         self.record_redo.store(false, Ordering::Release);

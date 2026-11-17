@@ -2,8 +2,8 @@
 //! as a graph restored from the same relationships, materialized.
 
 use super::*;
-use crate::graph::frozen::encode_targets;
 use crate::group_key::GroupKey;
+use relate_engine_api::{encode_targets, FrozenRelType};
 use relate_ir::Direction;
 use std::sync::Arc;
 
@@ -238,7 +238,7 @@ fn type_scans_statistics_and_postings_match_the_materialized_restore() {
 }
 
 #[test]
-fn a_frozen_graph_refuses_materialized_relationships_and_a_second_topology() {
+fn a_frozen_graph_refuses_writes_materialized_relationships_and_a_second_topology() {
     let f = frozen(&fixture());
     let rel = Relationship {
         id: 0,
@@ -255,6 +255,9 @@ fn a_frozen_graph_refuses_materialized_relationships_and_a_second_topology() {
         f.install_frozen_topology(Vec::new()),
         Err(relate_core::Error::Storage(_))
     ));
+    assert!(f.begin_write_at(TS + 1).is_err());
+    assert!(f.apply_redo(Vec::new(), TS + 1).is_err());
+    assert_eq!(f.all_rel_ids_at(TS).len(), f.next_rel_id() as usize);
     let m = with_nodes();
     m.load_checkpoint_rel(rel).unwrap();
     assert!(matches!(

@@ -106,8 +106,6 @@ pub use exec::{
 pub use frontier_decline::{FrontierDecline, FrontierDeclineReason, FrontierRunDecline};
 pub use function_registry::builtin_function_deprecation;
 pub use graph::constraint_keys::admission::{ConstraintAdmission, SlotPosition};
-#[doc(hidden)]
-pub use graph::FrozenRelType;
 pub use graph::{
     CheckpointTheater, ContainsCount, DatabaseEntry, Graph, Procedure, QueryStats, SchemaSnapshot,
     SnapshotPin,

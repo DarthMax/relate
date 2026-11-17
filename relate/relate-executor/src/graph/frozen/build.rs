@@ -1,117 +1,15 @@
-//! Building a [`FrozenTopology`]: the per-type input a loader fills, the
+//! Building a [`FrozenTopology`] from a loader's per-type lists: the
 //! transpose that derives the incoming side, and the graph's install.
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use relate_core::{Error, NodeId, Result};
+use relate_engine_api::FrozenRelType;
 
 use super::{FrozenTopology, InLists, OutLists, Present, PropColumn, TypeTopology};
 use crate::graph::Graph;
 use crate::store::Interner;
-
-/// One relationship type's outgoing lists, pushed in ascending source
-/// order. Every list is a directed relationship per target; a loader of an
-/// undirected source format pushes each relationship once.
-pub struct FrozenRelType {
-    name: String,
-    property_keys: Vec<String>,
-    nodes: Vec<u32>,
-    offsets: Vec<u32>,
-    first_rel: Vec<u32>,
-    bytes: Vec<u8>,
-    properties: Vec<Vec<f64>>,
-}
-
-/// The value count of one varlong stream, or why it is malformed.
-fn checked_count(bytes: &[u8]) -> Result<u32> {
-    let mut count = 0u32;
-    let mut prev = 0i64;
-    let mut delta = 0u64;
-    let mut shift = 0u32;
-    for &byte in bytes {
-        if shift > 56 {
-            return Err(Error::storage(
-                "frozen target list holds a varlong longer than 9 bytes",
-            ));
-        }
-        delta |= u64::from(byte & 0x7F) << shift;
-        if byte & 0x80 == 0 {
-            shift += 7;
-            continue;
-        }
-        prev = i64::try_from(delta)
-            .ok()
-            .and_then(|delta| prev.checked_add(delta))
-            .ok_or_else(|| Error::storage("frozen target delta overflows a node id"))?;
-        count = count
-            .checked_add(1)
-            .ok_or_else(|| Error::storage("frozen target list exceeds u32 hops"))?;
-        delta = 0;
-        shift = 0;
-    }
-    if shift != 0 {
-        return Err(Error::storage(
-            "frozen target list ends inside a truncated varlong",
-        ));
-    }
-    Ok(count)
-}
-
-fn offset(len: usize, what: &str) -> Result<u32> {
-    u32::try_from(len).map_err(|_| Error::storage(format!("frozen {what} exceeds u32")))
-}
-
-impl FrozenRelType {
-    pub fn new(name: impl Into<String>, property_keys: Vec<String>) -> Self {
-        let properties = property_keys.iter().map(|_| Vec::new()).collect();
-        Self {
-            name: name.into(),
-            property_keys,
-            nodes: Vec::new(),
-            offsets: vec![0],
-            first_rel: vec![0],
-            bytes: Vec::new(),
-            properties,
-        }
-    }
-
-    /// Append `source`'s list: `targets` is its sorted targets as a delta
-    /// varlong stream, `properties` one slice per property key, each
-    /// aligned with the targets. An empty list is skipped.
-    pub fn push(&mut self, source: NodeId, targets: &[u8], properties: &[&[f64]]) -> Result<()> {
-        let degree = checked_count(targets)?;
-        if properties.len() != self.property_keys.len()
-            || properties.iter().any(|p| p.len() != degree as usize)
-        {
-            return Err(Error::storage(format!(
-                "frozen relationship properties of node {source} do not match its {degree} targets"
-            )));
-        }
-        if degree == 0 {
-            return Ok(());
-        }
-        let node = u32::try_from(source)
-            .map_err(|_| Error::storage(format!("frozen source node {source} outside u32")))?;
-        if self.nodes.last().is_some_and(|&last| last >= node) {
-            return Err(Error::storage(format!(
-                "frozen source node {source} is not after its predecessor"
-            )));
-        }
-        let count = self.first_rel[self.nodes.len()]
-            .checked_add(degree)
-            .ok_or_else(|| Error::storage("frozen relationship type exceeds u32 relationships"))?;
-        self.bytes.extend_from_slice(targets);
-        self.offsets
-            .push(offset(self.bytes.len(), "target bytes of a type")?);
-        self.first_rel.push(count);
-        self.nodes.push(node);
-        for (column, values) in self.properties.iter_mut().zip(properties) {
-            column.extend_from_slice(values);
-        }
-        Ok(())
-    }
-}
 
 impl Present {
     fn of(words: Vec<u64>) -> Self {
@@ -193,6 +91,7 @@ impl FrozenTopology {
         let mut built = Vec::with_capacity(types.len());
         let mut base = 0i64;
         for ty in types {
+            let ty = ty.into_parts();
             if !names.insert(ty.name.clone()) {
                 return Err(Error::storage(format!(
                     "frozen relationship type {} appears twice",
@@ -251,6 +150,17 @@ impl Graph {
         self.frozen.get()
     }
 
+    /// A frozen topology has no write path: its relationships are not
+    /// records a write could version.
+    pub(in crate::graph) fn check_not_frozen(&self) -> Result<()> {
+        if self.frozen().is_some() {
+            return Err(Error::execution(
+                "this graph is read-only: its relationships are a frozen topology",
+            ));
+        }
+        Ok(())
+    }
+
     /// Make `types` this graph's relationships, read in place: no
     /// relationship record is stored and no adjacency is built. Only valid
     /// on a graph being restored, after its last node and instead of any
@@ -277,26 +187,4 @@ impl Graph {
             .set(topology)
             .map_err(|_| Error::storage("frozen topology installed twice"))
     }
-}
-
-/// The inverse of [`super::Targets`], for fixtures.
-#[cfg(test)]
-pub(in crate::graph) fn encode_targets(sorted: &[NodeId]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut prev = 0;
-    for &target in sorted {
-        let mut delta = (target - prev) as u64;
-        prev = target;
-        while delta >= 0x80 {
-            out.push((delta & 0x7F) as u8);
-            delta >>= 7;
-        }
-        out.push(delta as u8 | 0x80);
-    }
-    out
-}
-
-#[cfg(test)]
-pub(super) fn targets_of(bytes: &[u8]) -> Vec<NodeId> {
-    super::Targets { bytes, prev: 0 }.collect()
 }
