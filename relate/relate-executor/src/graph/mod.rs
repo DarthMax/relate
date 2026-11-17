@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use relate_catalog::{Catalog, ConstraintDef, IndexDef};
 use relate_core::{Namespace, Node, NodeId, RelId, Relationship, Result, Value};
@@ -57,6 +57,7 @@ mod degree_stats_estimate;
 mod degree_stats_incident;
 mod derived_migration;
 mod entity_mutation;
+mod frozen;
 mod id_vec;
 mod index;
 mod index_lookup;
@@ -66,6 +67,8 @@ mod label_probe;
 mod pin;
 mod prop_read;
 mod query_stats;
+#[doc(hidden)]
+pub use frozen::FrozenRelType;
 pub use pin::SnapshotPin;
 #[cfg(test)]
 use pin::PIN_ACQUIRE_RETRIES;
@@ -389,6 +392,9 @@ pub struct Graph {
     /// 24 bytes.
     sealed_out: SealedArena,
     sealed_in: SealedArena,
+    /// Set once by a read-only load that keeps its relationships as target
+    /// lists; `rels` and both adjacency sides then stay empty.
+    frozen: OnceLock<frozen::FrozenTopology>,
     /// LABS-851 (the structure round): the counting operator's count
     /// state — per-type rel counts, (start-label, type, end-label) pair
     /// counts, per-label live node counts, and the total live node
@@ -473,6 +479,7 @@ impl Default for Graph {
             in_adj: IdVec::default(),
             sealed_out: SealedArena::default(),
             sealed_in: SealedArena::default(),
+            frozen: OnceLock::new(),
             count_stats: Mutex::new(CountStats::default()),
             degree_histograms: Mutex::new(degree_stats::DegreeHistograms::default()),
             constraint_keys: Mutex::new(ConstraintKeyIndex::default()),
@@ -682,6 +689,9 @@ impl Graph {
     }
 
     pub fn rel_at(&self, id: RelId, ts: u64) -> Option<Relationship> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.rel(id);
+        }
         self.rels
             .get(&id)
             .and_then(|vers| visible_version(&vers, ts).map(|v| v.live.to_rel(id, &self.interner)))
@@ -689,6 +699,9 @@ impl Graph {
 
     /// Endpoints only — expand / BFS must not materialize property maps (ADR-0033).
     pub fn rel_ends_at(&self, id: RelId, ts: u64) -> Option<(NodeId, NodeId)> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.ends(id);
+        }
         self.rels
             .get(&id)
             .and_then(|vers| visible_version(&vers, ts).map(|v| (v.live.start, v.live.end)))
@@ -704,6 +717,10 @@ impl Graph {
     /// rel type: a live-incidence match must hold on all three axes,
     /// not the endpoints alone.
     fn rel_live_identity(&self, id: RelId) -> Option<(NodeId, NodeId, u32)> {
+        if let Some(frozen) = self.frozen() {
+            let (start, end) = frozen.ends(id)?;
+            return Some((start, end, frozen.type_id(id)?));
+        }
         self.rels.get(&id).and_then(|vers| {
             live_version(&vers).map(|v| (v.live.start, v.live.end, v.live.type_id))
         })
@@ -716,6 +733,9 @@ impl Graph {
     }
 
     pub fn rel_stub_at(&self, id: RelId, ts: u64) -> Option<Relationship> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.stub(id);
+        }
         self.rels
             .get(&id)
             .and_then(|vers| visible_version(&vers, ts).map(|v| v.live.stub(id)))
@@ -728,6 +748,9 @@ impl Graph {
     }
 
     pub fn rel_prop_at(&self, id: RelId, ts: u64, key: &str) -> Option<Value> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.prop(id, key);
+        }
         self.rels.get(&id).and_then(|vers| {
             visible_version(&vers, ts).and_then(|v| v.live.payload.get(&self.interner, key))
         })
@@ -744,6 +767,9 @@ impl Graph {
     }
 
     pub fn rel_prop_keys_at(&self, id: RelId, ts: u64) -> Vec<String> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.prop_keys(id);
+        }
         self.rels
             .get(&id)
             .and_then(|vers| {
@@ -754,6 +780,9 @@ impl Graph {
     }
 
     pub(crate) fn rel_visible_at(&self, id: RelId, ts: u64) -> bool {
+        if let Some(frozen) = self.frozen() {
+            return frozen.contains(id);
+        }
         self.rels
             .get(&id)
             .is_some_and(|vers| visible_version(&vers, ts).is_some())
@@ -900,6 +929,9 @@ impl Graph {
     }
 
     pub fn all_rel_ids_at(&self, ts: u64) -> Vec<RelId> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.all_ids();
+        }
         let mut ids: Vec<_> = self
             .rels
             .keys()

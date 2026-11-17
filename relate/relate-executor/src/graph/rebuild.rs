@@ -50,7 +50,9 @@ impl Graph {
         // one materialization in materialize order — no fold's result
         // depends on row order.
         let start_shards = shard_rows(&rows, |row| row.start);
-        adj_build(self, &rows, &start_shards);
+        if self.frozen().is_none() {
+            adj_build(self, &rows, &start_shards);
+        }
         self.rebuild_degree_stats(&rows, &labels, &start_shards);
         self.rebuild_count_stats(&rows, &labels, &start_shards);
         // The wholesale rebuild replaces the histogram map: recompute the
@@ -63,6 +65,9 @@ impl Graph {
     /// `adj_build` and both folds consume, so the three read one pass over
     /// the rel store rather than three.
     fn materialize_rel_rows(&self) -> Vec<RelRow> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.rows();
+        }
         let mut rows: Vec<RelRow> = Vec::new();
         self.rels.for_each(|id, vers| {
             let Some(ver) = live_version(vers) else {

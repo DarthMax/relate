@@ -92,7 +92,10 @@ impl Graph {
         self.with_pair(
             &self.indexes.rel_prop_pairs,
             (type_id, kid),
-            |g: &Graph| g.rels.keys(),
+            |g: &Graph| match g.frozen() {
+                Some(frozen) => frozen.ids_of_type(type_id).collect(),
+                None => g.rels.keys(),
+            },
             |g: &Graph, id: i64, f: &mut dyn FnMut(&Value)| {
                 g.for_each_rel_pair_value(id, type_id, key, kid, f)
             },
@@ -129,6 +132,14 @@ impl Graph {
         kid: u32,
         mut f: impl FnMut(&Value),
     ) {
+        if let Some(frozen) = self.frozen() {
+            if frozen.type_id(id) == Some(type_id) {
+                if let Some(val) = frozen.prop_by_id(id, kid) {
+                    f(&val);
+                }
+            }
+            return;
+        }
         let Some(vers) = self.rels.get(&id) else {
             return;
         };

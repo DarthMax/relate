@@ -465,6 +465,9 @@ impl Graph {
     }
 
     pub fn degree_out(&self, id: NodeId) -> Vec<RelId> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.rel_ids(id, relate_ir::Direction::Outgoing);
+        }
         self.out_side().flatten(id)
     }
 
@@ -479,6 +482,9 @@ impl Graph {
         dir: relate_ir::Direction,
         types: &RelTypes,
     ) -> usize {
+        if let Some(frozen) = self.frozen() {
+            return frozen.degree(id, dir, types);
+        }
         let Some(ids) = types.ids() else {
             return self.adj_len(id, dir);
         };
@@ -492,6 +498,9 @@ impl Graph {
     /// LABS-351 histogram maintenance both consume. No string re-interning:
     /// the caller holds the interned type id.
     pub(crate) fn out_chunk_len(&self, node: NodeId, type_id: u32) -> u64 {
+        if let Some(frozen) = self.frozen() {
+            return frozen.out_degree_of_type(node, type_id) as u64;
+        }
         self.out_side().typed_len(node, std::iter::once(type_id)) as u64
     }
 
@@ -517,10 +526,16 @@ impl Graph {
     /// an approximate degree for choosing which side of an existence
     /// probe to walk (LABS-193).
     pub fn adj_len(&self, id: NodeId, dir: relate_ir::Direction) -> usize {
+        if let Some(frozen) = self.frozen() {
+            return frozen.degree(id, dir, &RelTypes::Any);
+        }
         self.sides(dir).map(|(side, _)| side.len(id)).sum()
     }
 
     pub fn degree_in(&self, id: NodeId) -> Vec<RelId> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.rel_ids(id, relate_ir::Direction::Incoming);
+        }
         self.in_side().flatten(id)
     }
 
@@ -583,6 +598,9 @@ impl Graph {
         mut f: impl FnMut(RelId, NodeId) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), E> {
         use relate_ir::Direction;
+        if let Some(frozen) = self.frozen() {
+            return frozen.try_for_each_hop(id, dir, types, f);
+        }
         let mut emit = |rid: RelId, start: NodeId, end: NodeId| {
             match crate::store::hop_other(id, start, end, dir) {
                 Some(peer) => f(rid, peer),

@@ -103,6 +103,11 @@ impl Graph {
     /// by `Graph::finish_restore` after the load.
     pub fn load_checkpoint_rel(&self, rel: Relationship) -> Result<()> {
         self.check_restoring()?;
+        if self.frozen().is_some() {
+            return Err(relate_core::Error::storage(
+                "checkpoint relationship loaded beside a frozen topology",
+            ));
+        }
         let next = checked_persisted_id(rel.id, "relationship")?;
         checked_persisted_id(rel.start, "relationship start")?;
         checked_persisted_id(rel.end, "relationship end")?;
@@ -132,7 +137,7 @@ impl Graph {
         self.clear_checkpoint_dirty();
     }
 
-    fn check_restoring(&self) -> Result<()> {
+    pub(super) fn check_restoring(&self) -> Result<()> {
         if self.in_write.load(Ordering::Acquire) {
             return Err(relate_core::Error::storage(
                 "checkpoint restore while a write is open",

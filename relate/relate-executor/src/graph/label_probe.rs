@@ -242,6 +242,9 @@ impl Graph {
     /// `None` when the rel is not visible: the overlay's shared type
     /// read resolves the batch layer first, so this is the base half.
     pub(crate) fn rel_type_name_shared(&self, id: RelId, ts: u64) -> Option<Arc<str>> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.type_name(id);
+        }
         self.rels
             .get(&id)
             .and_then(|vers| visible_version(&vers, ts).map(|ver| ver.live.type_name_shared()))
@@ -325,6 +328,9 @@ impl Graph {
         let Some(type_id) = self.rel_type_id(rel_type) else {
             return Vec::new();
         };
+        if let Some(frozen) = self.frozen() {
+            return frozen.ids_of_type(type_id).collect();
+        }
         let mut ids = Vec::new();
         self.rels.for_each(|id, vers| {
             let matches = vers

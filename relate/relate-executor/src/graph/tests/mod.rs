@@ -7,6 +7,7 @@ mod adjacency;
 mod adjacency_model_proptest;
 mod chain;
 mod correctness;
+mod frozen;
 mod label_set_counts;
 mod pattern_stats;
 mod point;

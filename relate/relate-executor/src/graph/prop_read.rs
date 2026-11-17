@@ -18,6 +18,9 @@ impl Graph {
     /// properties as typed fields rather than by id, so it still matches on
     /// the key text.
     pub(crate) fn rel_prop_id_at(&self, id: RelId, ts: u64, key: &str, kid: u32) -> Option<Value> {
+        if let Some(frozen) = self.frozen() {
+            return frozen.prop_by_id(id, kid);
+        }
         self.rels.get(&id).and_then(|vers| {
             visible_version(&vers, ts).and_then(|v| v.live.payload.get_by_id(key, kid))
         })
