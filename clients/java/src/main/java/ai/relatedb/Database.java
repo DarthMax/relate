@@ -39,6 +39,23 @@ public class Database implements AutoCloseable {
         return new Database(out.getValue());
     }
 
+    /**
+     * POC: open a Neo4j GDS graph held in native memory. {@code address}
+     * points at the whole Arrow IPC file a GDS export writes as
+     * {@code graph.arrow}, {@code length} is its size in bytes. The graph is
+     * loaded before this returns and the memory is not retained, so the
+     * caller frees it afterwards. The database is read-only. Fails when the
+     * native library was built without the {@code gds-codec} feature.
+     */
+    public static Database openGdsArrow(long address, long length) {
+        PointerByReference out = new PointerByReference();
+        PointerByReference err = new PointerByReference();
+        NativeLib.check(NativeLib.lib().relate_database_open_gds_arrow(
+                new Pointer(address), length, out, err),
+                "relate_database_open_gds_arrow", err);
+        return new Database(out.getValue());
+    }
+
     public Connection connect() {
         // Canonical entry point (ADR-0220): a null name selects the default
         // "neo4j" namespace; JNA marshals a null String as NULL.

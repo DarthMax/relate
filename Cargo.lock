@@ -2396,9 +2396,11 @@ dependencies = [
  "relate",
  "relate-core",
  "relate-model",
+ "relate-storage",
  "relate-test-support",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

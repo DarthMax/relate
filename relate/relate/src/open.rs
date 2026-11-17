@@ -132,6 +132,17 @@ impl Database {
         Self::open_with(uri, OpenOptions::with_mode(OpenMode::Ephemeral))
     }
 
+    /// Open a Neo4j GDS graph held in memory: `bytes` is the whole Arrow
+    /// IPC file a GDS export writes as `graph.arrow`. The graph is loaded
+    /// into memory and `bytes` is not retained; writes and checkpoints are
+    /// refused. Fails when the build lacks the `gds-codec` feature.
+    pub fn open_gds_arrow(bytes: &[u8]) -> Result<Self> {
+        let opts = OpenOptions::with_mode(OpenMode::ReadOnly);
+        let knobs = Self::open_preflight(&opts)?;
+        let store = relate_storage::gds_arrow_target(bytes)?;
+        Self::open_store(store, opts, knobs)
+    }
+
     /// Test hook: the shared engine state, for `commit.rs` group-commit tests
     /// that build a `flush_group` batch by hand. Not part of the public API.
     #[cfg(test)]

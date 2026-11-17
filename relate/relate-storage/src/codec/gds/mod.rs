@@ -39,8 +39,7 @@ pub(crate) fn is_export_dir(path: &std::path::Path) -> bool {
 }
 
 /// The store target of a GDS export directory: the export read through a
-/// leaseless native VFS, the WAL in memory (seeded with one segment,
-/// since a read-only open requires an existing WAL).
+/// leaseless native VFS.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn export_target(
     path: &std::path::Path,
@@ -49,10 +48,6 @@ pub(crate) fn export_target(
     wal_dir: Option<std::path::PathBuf>,
     config: Option<&super::open_config::CodecOpenConfig>,
 ) -> Result<StoreTarget> {
-    use std::sync::Arc;
-
-    use crate::vfs::{MemoryVfs, NativeVfs, Vfs};
-
     super::check_available(SnapshotCodecKind::Gds)?;
     if let Some(want) = requested.filter(|want| *want != SnapshotCodecKind::Gds) {
         return Err(Error::storage(format!(
@@ -70,11 +65,32 @@ pub(crate) fn export_target(
             "GDS Arrow graphs take no WAL directory or codec configuration",
         ));
     }
+    read_only_target(std::sync::Arc::new(crate::vfs::NativeVfs::new(path)))
+}
+
+/// The store target of a GDS export held in memory: `bytes` is the whole
+/// `graph.arrow` IPC file. The load consumes the copy made here, so the
+/// open database keeps none. Open the target read-only.
+pub fn arrow_target(bytes: &[u8]) -> Result<StoreTarget> {
+    super::check_available(SnapshotCodecKind::Gds)?;
+    let vfs = crate::vfs::MemoryVfs::new();
+    crate::vfs::atomic_write(&vfs, GRAPH_ARROW, bytes)?;
+    read_only_target(std::sync::Arc::new(vfs))
+}
+
+/// A GDS target over `vfs`, which holds `graph.arrow`: the WAL in memory,
+/// seeded with one segment, since a read-only open requires an existing
+/// WAL.
+fn read_only_target(vfs: std::sync::Arc<dyn crate::vfs::Vfs>) -> Result<StoreTarget> {
+    use std::sync::Arc;
+
+    use crate::vfs::{MemoryVfs, Vfs};
+
     let wal_vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
     let wal_prefix = SnapshotCodecKind::Gds.wal_dir();
     crate::Wal::open(Arc::clone(&wal_vfs), wal_prefix, 0)?;
     Ok(StoreTarget {
-        vfs: Arc::new(NativeVfs::new(path)),
+        vfs,
         wal_vfs,
         wal_prefix: wal_prefix.to_owned(),
         native_root: None,
@@ -90,6 +106,11 @@ pub(crate) fn load_with_checkpoint_lsn<G: relate_engine_api::SnapshotGraph>(
 ) -> Result<LoadedSnapshot<G>> {
     let bytes = crate::snapshot::get_object_opt(target, GRAPH_ARROW)?
         .ok_or_else(|| Error::storage(format!("GDS Arrow store has no {GRAPH_ARROW}")))?;
+    // An in-memory export exists only to be loaded: drop its copy now
+    // rather than hold it for the database's lifetime.
+    if !target.vfs.durable() {
+        target.vfs.remove_file(GRAPH_ARROW)?;
+    }
     Ok(LoadedSnapshot {
         graph: load::load_graph(bytes, load::Topology::from_env()?)?,
         checkpoint_lsn: 0,

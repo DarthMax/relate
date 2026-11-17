@@ -143,6 +143,7 @@ Every function the header declares. `relate_status` is
 | --- | --- | --- |
 | `relate_database_open(const char *uri, relate_database *out, char **error_json)` | status | `":memory:"`, a Native directory, or a `file://…` / `*.rl` URI; `*out` NULL on error |
 | `relate_database_open_read_only(const char *uri, relate_database *out, char **error_json)` | status | opens an existing store without writing, checkpointing or creating (ADR-0136); reads succeed, writes and checkpoints fail "database is read-only" |
+| `relate_database_open_gds_arrow(const uint8_t *bytes, size_t len, relate_database *out, char **error_json)` | status | POC: opens a Neo4j GDS graph from the in-memory Arrow IPC file a GDS export writes as `graph.arrow`; loaded before return, `bytes` not retained; read-only; fails when the library lacks the `gds-codec` feature |
 | `relate_database_close(relate_database db)` | status | frees the handle (also when poisoned); `RELATE_ERROR` on NULL |
 | `relate_connect_namespace(relate_database db, const char *name, relate_connection *out, char **error_json)` | status | the one connect entry point, with a session namespace (ADR-0117, ADR-0220); NULL name selects `neo4j` |
 | `relate_conn_set_namespace(relate_connection conn, const char *name, char **error_json)` | status | changes the session namespace between transactions; a NULL name is a refused argument, never dereferenced |

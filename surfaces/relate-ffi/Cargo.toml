@@ -12,11 +12,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 default = []
 # Measurement-only pass-through for the experimental snapshot codec.
 rkyv-codec = ["relate/rkyv-codec"]
+# POC pass-through: opening Neo4j GDS Arrow graphs.
+gds-codec = ["relate/gds-codec"]
 
 [dev-dependencies]
 # The one workspace home of the process-wide preview-opt-in test fixture
 # (ADR-0593); no features — the preview module is un-gated.
 relate-test-support = { workspace = true }
+# The GDS export fixture, compiled in with `gds-codec`.
+relate-storage = { workspace = true }
+tempfile = { workspace = true }
 
 [dependencies]
 chrono = { workspace = true }

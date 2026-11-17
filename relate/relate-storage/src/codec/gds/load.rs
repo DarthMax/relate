@@ -400,7 +400,7 @@ fn freeze_rels(
                 let targets = decode_targets(encoded)?;
                 let keep = targets
                     .iter()
-                    .map(|target| *target)
+                    .copied()
                     .map(undirected_copies(rels.direction, source))
                     .collect();
                 Some((targets, keep))

@@ -124,3 +124,23 @@ fn clone_converts_a_gds_export_to_parquet() {
         ]
     );
 }
+
+#[test]
+fn a_gds_graph_opens_from_in_memory_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    export(dir.path());
+    let bytes = std::fs::read(dir.path().join("graph.arrow")).unwrap();
+    let from_dir = Database::open_read_only(uri(dir.path())).unwrap();
+    let db = Database::open_gds_arrow(&bytes).unwrap();
+    drop(bytes);
+    for cypher in [
+        "MATCH (n) RETURN n.originalId, labels(n), n.age ORDER BY n.originalId",
+        "MATCH (a)-[r]->(b) RETURN a.originalId, type(r), r.since, b.originalId ORDER BY id(r)",
+        "MATCH (c:City)-[:LIVES_NEAR]-(p) RETURN p.originalId ORDER BY p.originalId",
+    ] {
+        assert_eq!(query(&db, cypher), query(&from_dir, cypher), "{cypher}");
+        assert!(!query(&db, cypher).is_empty());
+    }
+    assert!(db.connect().unwrap().query("CREATE ()").is_err());
+    assert!(Database::open_gds_arrow(b"not arrow").is_err());
+}

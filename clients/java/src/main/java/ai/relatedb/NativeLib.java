@@ -47,6 +47,8 @@ final class NativeLib {
 
         int relate_database_open(String uri, PointerByReference out, PointerByReference errorJson);
         int relate_database_open_read_only(String uri, PointerByReference out, PointerByReference errorJson);
+        int relate_database_open_gds_arrow(Pointer bytes, long len, PointerByReference out,
+                PointerByReference errorJson);
         int relate_database_close(Pointer db);
         int relate_connect_namespace(Pointer db, String name, PointerByReference out, PointerByReference errorJson);
         int relate_conn_set_namespace(Pointer conn, String name, PointerByReference errorJson);

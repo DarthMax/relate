@@ -50,6 +50,21 @@ python3 scripts/gds-poc/bench.py $D id frozen
 RELATE_GDS_TOPOLOGY=materialized python3 scripts/gds-poc/bench.py $D id materialized
 ```
 
+### From memory, through the C ABI and the Java client
+
+`relate_database_open_gds_arrow(bytes, len, …)` (C) and
+`Database.openGdsArrow(address, length)` (Java) open the same Arrow IPC bytes
+from memory instead of a directory. The native library must be built with
+the codec, and the Java client pointed at it:
+
+```bash
+cargo build --release -p relate-ffi --features gds-codec
+export RELATE_LIB=$PWD/target/release/librelate_ffi.so
+```
+
+`scripts/gds-poc/GdsArrowSmoke.java` loads a `graph.arrow` into native
+memory, opens it and runs each argument as a query.
+
 ## 3. Writable copy
 
 Clone the export to Parquet, then open the clone normally:

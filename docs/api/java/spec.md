@@ -22,6 +22,12 @@ try (Database db = Database.open(":memory:");        // AutoCloseable
 (ADR-0136) — a missing store is an error. `Database.open(uri)` stays
 writable and creates a missing store at open.
 
+POC: `Database.openGdsArrow(address, length)` opens a Neo4j GDS graph held
+in native memory — the whole Arrow IPC file a GDS export writes as
+`graph.arrow`. The graph is loaded before the call returns and the memory is
+not retained; the database is read-only. It fails when the native library
+was built without the `gds-codec` feature, which the bundled libraries are.
+
 `begin()` / `commit()` / `rollback()` are an explicit transaction (ADR-0028).
 `commit()` returns the transaction's bookmark (`"relate:<n>"`, or `null`
 when the transaction committed nothing). A write-write conflict throws

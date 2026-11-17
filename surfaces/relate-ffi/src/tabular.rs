@@ -186,12 +186,14 @@ fn contain(
     }
 }
 
+/// Run `open` behind the panic guard and hand its database out as a
+/// handle.
+///
 /// # Safety
-/// Pointer arguments must be null or valid for this call, matching the C header.
-unsafe fn database_open(
-    uri: *const c_char,
+/// `out` must be null or writable, matching the C header.
+unsafe fn database_open_with(
     out: *mut *mut relate_database,
-    mode: OpenMode,
+    open: impl FnOnce() -> Result<Database, RenderedError>,
 ) -> Result<(), RenderedError> {
     if out.is_null() {
         return Err(boundary_error_json("null out pointer"));
@@ -202,27 +204,37 @@ unsafe fn database_open(
     }
     // Decode and open inside the guarded closure so a panic never unwinds
     // across the FFI boundary.
-    match catch_unwind(AssertUnwindSafe(|| {
+    match catch_unwind(AssertUnwindSafe(open)) {
+        Ok(Ok(db)) => {
+            // SAFETY: `out` is non-null (checked above) and writable per the caller contract.
+            unsafe {
+                *out = Box::into_raw(Box::new(relate_database {
+                    db,
+                    poisoned: AtomicBool::new(false),
+                }));
+            }
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e),
+        Err(payload) => Err(boundary_error_json(&panic_message(payload))),
+    }
+}
+
+/// # Safety
+/// Pointer arguments must be null or valid for this call, matching the C header.
+unsafe fn database_open(
+    uri: *const c_char,
+    out: *mut *mut relate_database,
+    mode: OpenMode,
+) -> Result<(), RenderedError> {
+    let open = || {
         // SAFETY: `uri` is null or a valid C string per the caller
         // contract; the one decode idiom, like every other boundary read.
         let uri = unsafe { read_cstr(uri) }.map_err(|m| boundary_error_json(&m))?;
-        match Database::open_with(&uri, OpenOptions::with_mode(mode)) {
-            Ok(db) => {
-                // SAFETY: `out` is non-null (checked above) and writable per the caller contract.
-                unsafe {
-                    *out = Box::into_raw(Box::new(relate_database {
-                        db,
-                        poisoned: AtomicBool::new(false),
-                    }));
-                }
-                Ok(())
-            }
-            Err(e) => Err(engine_error_json(&e)),
-        }
-    })) {
-        Ok(result) => result,
-        Err(payload) => Err(boundary_error_json(&panic_message(payload))),
-    }
+        Database::open_with(&uri, OpenOptions::with_mode(mode)).map_err(|e| engine_error_json(&e))
+    };
+    // SAFETY: forwarded; `out` is checked there.
+    unsafe { database_open_with(out, open) }
 }
 
 /// # Safety
@@ -247,6 +259,30 @@ pub unsafe extern "C" fn relate_database_open_read_only(
 ) -> relate_status {
     // SAFETY: forwarded to `database_open`, which checks `out` and `uri`.
     unsafe { report(database_open(uri, out, OpenMode::ReadOnly), error_json) }
+}
+
+/// # Safety
+/// Pointer arguments must be null or valid for this call, matching the C
+/// header; `bytes` must be readable for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn relate_database_open_gds_arrow(
+    bytes: *const u8,
+    len: usize,
+    out: *mut *mut relate_database,
+    error_json: *mut *mut c_char,
+) -> relate_status {
+    let open = || {
+        if bytes.is_null() {
+            return Err(boundary_error_json("null bytes pointer"));
+        }
+        // SAFETY: `bytes` is non-null (checked above) and readable for
+        // `len` bytes per the caller contract; the slice does not outlive
+        // this call.
+        let bytes = unsafe { std::slice::from_raw_parts(bytes, len) };
+        Database::open_gds_arrow(bytes).map_err(|e| engine_error_json(&e))
+    };
+    // SAFETY: forwarded; `out` is checked there.
+    unsafe { report(database_open_with(out, open), error_json) }
 }
 
 /// # Safety

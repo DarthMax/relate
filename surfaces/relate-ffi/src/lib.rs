@@ -134,6 +134,10 @@ mod tabular_bookmarks_tests;
 mod value_walker_tests;
 
 #[cfg(test)]
+#[path = "tests/gds_arrow.rs"]
+mod gds_arrow_tests;
+
+#[cfg(test)]
 #[path = "tests/params_builder.rs"]
 mod params_builder_tests;
 

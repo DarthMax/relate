@@ -143,6 +143,17 @@ relate_status relate_database_open(const char *uri, relate_database *out, char *
  * with "database is read-only".
  */
 relate_status relate_database_open_read_only(const char *uri, relate_database *out, char **error_json);
+
+/*
+ * Open a Neo4j GDS graph held in memory: `bytes` is the whole Arrow IPC
+ * file a GDS export writes as graph.arrow, `len` its length. The graph is
+ * loaded before the call returns and `bytes` is not retained, so the
+ * caller may free it afterwards. The database is read-only, like
+ * relate_database_open_read_only. Fails when the library was built
+ * without the gds-codec feature. Same out-param and error channel rules
+ * as relate_database_open.
+ */
+relate_status relate_database_open_gds_arrow(const uint8_t *bytes, size_t len, relate_database *out, char **error_json);
 relate_status relate_database_close(relate_database db);
 
 /*

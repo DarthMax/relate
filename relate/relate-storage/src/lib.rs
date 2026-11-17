@@ -23,6 +23,7 @@ pub use native_ownership::{take_writer_lease, WriterLease};
 pub use native_ownership::{LOCK_MARKER, ROOT_ROLE, WAL_ROLE, WRITER_LEASE};
 use relate_core::{Error, Result};
 
+pub use codec::gds::arrow_target as gds_arrow_target;
 #[cfg(gds_codec)]
 #[doc(hidden)]
 pub use codec::gds::fixture as gds_fixture;
