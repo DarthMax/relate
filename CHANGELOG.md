@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-11-17
+
 ### Changed
 
 - A shortest-path endpoint whose `WHERE` no index serves (`WHERE b.id + 0 =
@@ -176,8 +178,9 @@ First release of Relate — the embedded, in-memory property graph engine
 with an openCypher query contract, WAL + snapshot durability, and Bolt
 serving. See the README for the full surface list.
 
-[Unreleased]: https://github.com/relatedb/relate/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/relatedb/relate/compare/v1.1.0...HEAD
 
+[1.1.0]: https://github.com/relatedb/relate/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/relatedb/relate/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/relatedb/relate/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/relatedb/relate/compare/v0.1.3...v1.0.0
