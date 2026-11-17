@@ -1,4 +1,5 @@
 use super::*;
+use crate::graph::adjacency::AdjSide;
 use crate::graph::count_state::CountStats;
 use crate::graph::degree_stats::DegreeHistograms;
 use crate::graph::rebuild::take_adj_builds;
@@ -615,6 +616,78 @@ fn sharded_rebuild_matches_the_single_shard_one() {
     crate::graph::shard::with_workers(4, || g.rebuild_adj());
     assert_eq!(take_shards_run(), 16);
     assert_eq!(rebuild_state(&g), serial);
+}
+
+/// Every node's sealed chunk length per type in one direction, plus the
+/// tier's arena and entry sizes — the sealed layout a rebuild emits.
+fn sealed_layout(
+    side: &AdjSide<'_>,
+    nodes: &[NodeId],
+    types: &[u32],
+) -> (Vec<usize>, u64, (usize, usize)) {
+    let lens = nodes
+        .iter()
+        .flat_map(|&node| {
+            types.iter().map(move |&type_id| {
+                side.sealed()
+                    .region(node)
+                    .map_or(0, |region| region.chunk_len(type_id))
+            })
+        })
+        .collect();
+    (
+        lens,
+        side.sealed().arena_bytes(),
+        side.sealed().entry_counts(),
+    )
+}
+
+/// The sharded rebuild seals what the single-shard one seals: every node
+/// carries several fold-sized chunks per direction, so parallel shards
+/// install interleaved nodes' sealed spans (each node's batch as one tail
+/// span), and the published adjacency, the per-node sealed chunks and the
+/// tier's sizes all match the serial build's.
+#[test]
+fn sharded_rebuild_seals_like_the_single_shard_one() {
+    const TYPES: [&str; 3] = ["T0", "T1", "T2"];
+    let hops = crate::adjacency::RESTORE_SEAL_HOPS + 1;
+    let g = Graph::default();
+    g.begin_write().unwrap();
+    let nodes: Vec<NodeId> = (0..8)
+        .map(|_| g.create_node(vec!["N".into()], BTreeMap::new()).unwrap())
+        .collect();
+    for (i, &start) in nodes.iter().enumerate() {
+        for (t, rel_type) in TYPES.iter().enumerate() {
+            for h in 0..hops {
+                let end = nodes[(i + t + h + 1) % nodes.len()];
+                g.create_rel(start, end, rel_type.to_string(), BTreeMap::new())
+                    .unwrap();
+            }
+        }
+    }
+    g.commit_write();
+    let types: Vec<u32> = TYPES
+        .iter()
+        .map(|t| g.interner.get_id(t).unwrap())
+        .collect();
+    let layout = |g: &Graph| {
+        (
+            sealed_layout(&g.out_side(), &nodes, &types),
+            sealed_layout(&g.in_side(), &nodes, &types),
+        )
+    };
+
+    g.rebuild_adj();
+    let serial = (rebuild_state(&g), layout(&g));
+    assert!(
+        serial.1 .0 .0.iter().all(|&len| len == hops),
+        "every out chunk sealed: {:?}",
+        serial.1 .0 .0
+    );
+    crate::graph::shard::with_workers(4, || g.rebuild_adj());
+    assert_eq!((rebuild_state(&g), layout(&g)), serial);
+    assert_eq!(g.out_side().sealed().assert_fit(), 0);
+    assert_eq!(g.in_side().sealed().assert_fit(), 0);
 }
 
 /// The wholesale build's emission (ADR-0599 / ADR-0608): a restored store's

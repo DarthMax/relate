@@ -10,7 +10,7 @@ use relate_core::RelId;
 use crate::UsedSet;
 
 use super::{
-    merge_chunk, reclaim, SealedRegion, Supersede, Tombstone, COMPACTION_DELTA_FLOOR,
+    merge_chunk, reclaim, SealSink, SealedRegion, Supersede, Tombstone, COMPACTION_DELTA_FLOOR,
     PHYSICAL_READ_TS, RESTORE_SEAL_HOPS,
 };
 
@@ -384,10 +384,11 @@ impl TypedAdj {
     /// the never-sealed fold floor the caller's gate selected — the write
     /// path's [`COMPACTION_DELTA_FLOOR`], the build's
     /// [`RESTORE_SEAL_HOPS`] — and only reaches [`Self::fold_chunk`]'s
-    /// below-floor guard.
-    pub(crate) fn fold_due(
+    /// below-floor guard. `sealed` is the node's arena region, or the
+    /// wholesale build's per-node batch.
+    pub(crate) fn fold_due<S: SealSink>(
         &mut self,
-        sealed: SealedRegion<'_>,
+        mut sealed: S,
         due: &[u32],
         horizon: u64,
         floor: usize,
@@ -402,7 +403,7 @@ impl TypedAdj {
                 .iter()
                 .position(|c| c.type_id == *type_id)
                 .expect("a due chunk is still present");
-            changed |= self.fold_chunk(sealed, ci, *type_id, horizon, floor);
+            changed |= self.fold_chunk(&mut sealed, ci, *type_id, horizon, floor);
         }
         changed
     }
@@ -411,9 +412,9 @@ impl TypedAdj {
     /// stream. An empty delta with no reclaimable tombstone is a true no-op
     /// (no re-encode, ADR-0551). `floor` gates the below-floor branch: a
     /// never-sealed chunk whose delta is under it keeps its hops.
-    fn fold_chunk(
+    fn fold_chunk<S: SealSink>(
         &mut self,
-        sealed: SealedRegion<'_>,
+        sealed: &mut S,
         ci: usize,
         type_id: u32,
         horizon: u64,

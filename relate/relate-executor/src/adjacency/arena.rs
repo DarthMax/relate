@@ -19,6 +19,22 @@ use crate::memory::{fit_exact, fit_reserved, vec_growth, vec_heap, vec_heap_exac
 use super::codec;
 use super::Hop;
 
+mod batch;
+pub(crate) use batch::NodeSealBatch;
+
+/// The sealed-chunk surface a fold reads and writes ([`super::TypedAdj`]'s
+/// `fold_due`): a node's arena region, or the wholesale build's per-node
+/// [`NodeSealBatch`] the arena installs in one step.
+pub(crate) trait SealSink {
+    fn has_chunk(&self, type_id: u32) -> bool;
+    fn decoded(&self, type_id: u32) -> Vec<Hop>;
+    fn tombstones(&self, type_id: u32) -> Vec<Tombstone>;
+    /// Store one type's sealed hop stream and tombstones, or drop the
+    /// type's entry when both are empty. `false` refuses at a tier wall
+    /// and leaves the sink as it was.
+    fn put_chunk(&mut self, type_id: u32, hops: &[Hop], tombstones: Vec<Tombstone>) -> bool;
+}
+
 /// What superseded a sealed position. The fold needs it: a deleted row has
 /// no successor hop, a repositioned one is still live at its delta hop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,6 +420,20 @@ impl ArenaStore {
             return true;
         }
         let stream = codec::encode_chunk(hops);
+        self.store_stream(node, type_id, &stream, hop_count(hops.len()), tombstones)
+    }
+
+    /// [`Self::put_chunk`]'s store half, over an already encoded stream of
+    /// `hops` hops — the one entry write the per-chunk fold and a batch
+    /// install into an existing span share.
+    fn store_stream(
+        &mut self,
+        node: NodeId,
+        type_id: u32,
+        stream: &[u8],
+        hops: u32,
+        tombstones: Vec<Tombstone>,
+    ) -> bool {
         // The walls under this lock, in the same spelling the fold's
         // pre-check uses: a founding needs a span slot, and the stream —
         // at the codec's own bound — must keep the arena under the offset.
@@ -417,12 +447,8 @@ impl ArenaStore {
         // The arena offset and the hop count, at the u32 fields' structural
         // boundaries — checked, never truncated.
         let off = u32::try_from(self.bytes.len()).expect("the arena stays under 4 GiB");
-        self.bytes.extend_from_slice(&stream);
-        let entry = Entry {
-            type_id,
-            off,
-            hops: hop_count(hops.len()),
-        };
+        self.bytes.extend_from_slice(stream);
+        let entry = Entry { type_id, off, hops };
         let i = match self.entry_index(node, type_id) {
             Some(i) => {
                 self.mark_dead(self.entries[i]);
@@ -601,6 +627,14 @@ impl SealedArena {
 
     fn write(&self) -> RwLockWriteGuard<'_, ArenaStore> {
         self.store.write().expect("sealed arena lock")
+    }
+
+    /// Install one node's [`NodeSealBatch`] under one write lock — the
+    /// wholesale build's emission (ADR-0608). `false` refuses at the arena
+    /// offset wall and installs nothing; the caller keeps the node's delta.
+    pub(crate) fn install_node(&self, node: NodeId, batch: NodeSealBatch) -> bool {
+        let chunks = batch.into_chunks();
+        chunks.is_empty() || self.write().install_node(node, chunks)
     }
 
     /// The node's sealed region — a cheap handle that re-locks per access —
@@ -892,5 +926,23 @@ impl SealedRegion<'_> {
         self.arena
             .write()
             .put_chunk(self.node, type_id, hops, tombstones)
+    }
+}
+
+impl SealSink for SealedRegion<'_> {
+    fn has_chunk(&self, type_id: u32) -> bool {
+        SealedRegion::has_chunk(self, type_id)
+    }
+
+    fn decoded(&self, type_id: u32) -> Vec<Hop> {
+        SealedRegion::decoded(self, type_id)
+    }
+
+    fn tombstones(&self, type_id: u32) -> Vec<Tombstone> {
+        SealedRegion::tombstones(self, type_id)
+    }
+
+    fn put_chunk(&mut self, type_id: u32, hops: &[Hop], tombstones: Vec<Tombstone>) -> bool {
+        SealedRegion::put_chunk(self, type_id, hops, tombstones)
     }
 }

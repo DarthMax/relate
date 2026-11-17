@@ -7,7 +7,7 @@
 use super::id_vec::IdVec;
 use super::shard;
 use super::*;
-use crate::adjacency::{Hop, SealedRegion};
+use crate::adjacency::{Hop, NodeSealBatch, SealedRegion};
 
 /// One adjacency chunk's type and delta + sealed hop count — named, because
 /// the two integers swap silently as a tuple.
@@ -362,8 +362,13 @@ fn build_shard(
 /// whole predicate and the horizon is inert. Both wholesale rebuilds (a
 /// restore and an aborted write's) emit it here, in the one pass that
 /// derives adjacency, instead of a second serial walk folding afterwards.
-/// The node is one shard's alone, so the arena's one write lock serializes
-/// the emission's appends but never two folds of the same node.
+/// The fold writes into a per-node [`NodeSealBatch`] — encoded here, on the
+/// shard's thread — and the arena installs the node's chunks under one
+/// write lock as a fresh tail span: shards interleave nodes, so sealing
+/// chunk by chunk would land a node's later chunks mid-array, each paying
+/// a span-table shift scan under the tier's one lock. An install the arena
+/// offset wall refuses leaves the node's whole adjacency in the delta
+/// tier, as a refused per-chunk put leaves its chunk.
 fn build_node(
     rows: &[RelRow],
     node_run: &[usize],
@@ -373,25 +378,31 @@ fn build_node(
     let node = side.endpoint(&rows[node_run[0]]);
     // One run per type: its type id and its hops, unsorted and keyless —
     // `TypedAdj::from_runs` derives the chunk-order key from the hops.
-    let runs = node_run
-        .chunk_by(|&a, &b| rows[a].type_id == rows[b].type_id)
-        .map(|run| {
-            let hops: Vec<Hop> = run
-                .iter()
-                .map(|&index| {
-                    let row = &rows[index];
-                    Hop {
-                        ts: row.ts,
-                        id: row.id,
-                    }
-                })
-                .collect();
-            (rows[run[0]].type_id, hops)
-        });
-    let mut adj = TypedAdj::from_runs(runs);
+    let runs = || {
+        node_run
+            .chunk_by(|&a, &b| rows[a].type_id == rows[b].type_id)
+            .map(|run| {
+                let hops: Vec<Hop> = run
+                    .iter()
+                    .map(|&index| {
+                        let row = &rows[index];
+                        Hop {
+                            ts: row.ts,
+                            id: row.id,
+                        }
+                    })
+                    .collect();
+                (rows[run[0]].type_id, hops)
+            })
+    };
+    let mut adj = TypedAdj::from_runs(runs());
     let gate = FoldGate::BuildSeal;
     let due = gate.due(&adj, None, 0);
-    adj.fold_due(sealed.region_or_default(node), &due, 0, gate.floor());
+    let mut batch = NodeSealBatch::default();
+    adj.fold_due(&mut batch, &due, 0, gate.floor());
+    if !sealed.install_node(node, batch) {
+        return (node, TypedAdj::from_runs(runs()));
+    }
     (node, adj)
 }
 

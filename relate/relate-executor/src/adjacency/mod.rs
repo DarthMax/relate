@@ -70,7 +70,8 @@ mod arena;
 #[cfg(test)]
 pub(crate) use self::arena::hop_count;
 pub(crate) use self::arena::{
-    tombstone_stride, Entry, SealedArena, SealedRegion, Span, Supersede, Tombstone, MAX_SPAN_TYPES,
+    tombstone_stride, Entry, NodeSealBatch, SealSink, SealedArena, SealedRegion, Span, Supersede,
+    Tombstone, MAX_SPAN_TYPES,
 };
 
 /// Bytes the entry array and its tombstone column gain from `added` new
