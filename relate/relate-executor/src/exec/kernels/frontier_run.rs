@@ -154,18 +154,14 @@ pub(crate) fn try_frontier_rows(
         params: ctx.params,
     });
     let mut serving = Serving {
-        ctx,
-        contract: &contract,
-        conjuncts: &conjuncts,
-        reduce: reduce.as_ref(),
-        tables: FrontierTables::new(contract.nfa.states as usize),
-        bufs: RuleBuffers::new(),
+        run: ClauseRun::new(ctx, &contract, &conjuncts, reduce.as_ref()),
         // ADR-0463 (LABS-781, OPLANE_REQ-00345609 item 6): the rung's
         // output container is a retaining container — each emitted row
         // charges the expression budget through the one `add_row`
         // spelling as it lands, ahead of the landing, at the rung's two
         // emission points (the capped consumer's served loop and
-        // `endpoint_rows`), so a kernel-served MATCH refuses at ~the cap
+        // the distinct-endpoint shapes' `emit_endpoint_row`), so a
+        // kernel-served MATCH refuses at ~the cap
         // while the rows land, never after the whole container is built.
         // The operators that still hand the dispatch layer a finished
         // container (the batch chain, the contracted chain/hub-star
@@ -173,9 +169,10 @@ pub(crate) fn try_frontier_rows(
         out: Vec::new(),
         out_retained: ctx.graph.retain_bytes(0)?,
     };
-    // The clause's walk start, recorded once: the frontier always starts
-    // at the pattern's first element, the seed side, forward, the scan
-    // segment's subject.
+    // The clause's walk start, recorded once per engagement: the frontier
+    // always starts at the pattern's first element, the seed side, forward,
+    // the scan segment's subject. The record keeps the clause's first
+    // start, so one call is what a per-row call produced.
     record_walk_start(WalkStart::seed_side_forward());
     // The consumer dispatch, once: the consumer is a fact of the contract,
     // never a per-row decision, and each serving shape owns its own row
@@ -201,37 +198,73 @@ pub(crate) fn try_frontier_rows(
     Ok(FrontierRows::Served(out))
 }
 
-/// The clause's run state, the two serving shapes' shared owner: the
-/// execution context, the compiled contract, the clause's flattened
-/// conjuncts and reduce tail, its one sparse table set and rule buffers
-/// (ADR-0478 Decision 6's allocation half, ADR-0521 — created once beside
-/// the contract, nothing allocated until the first arrival, and the
-/// allocation ceiling is each run's own level-boundary check over the
-/// bytes held, never an engagement gate; a run clears them per seed,
-/// `FrontierTables::begin_seed`), and the output container with its
-/// charge. Each shape takes `&mut` it and adds only its own difference.
-struct Serving<'a, 'g> {
+/// The clause's run scaffold, the one owner of everything a run of the
+/// clause needs and nothing an entry adds: the execution context, the
+/// compiled contract, the clause's flattened conjuncts and reduce tail,
+/// and its one sparse table set and rule buffers (ADR-0478 Decision 6's
+/// allocation half, ADR-0521 — nothing allocated until the first arrival,
+/// and the allocation ceiling is each run's own level-boundary check over
+/// the bytes held, never an engagement gate; a run clears them per seed,
+/// `FrontierTables::begin_seed`). Both entries build exactly this and
+/// neither re-spells it; the row rung wraps it in [`Serving`] for the
+/// output container, the EXISTS probe uses it bare.
+struct ClauseRun<'a, 'g> {
     ctx: ExecCtx<'g>,
     contract: &'a FrontierContract<'a>,
     conjuncts: &'a [Expr],
     reduce: Option<&'a MatchReduce<'a>>,
     tables: FrontierTables,
     bufs: RuleBuffers,
-    out: Vec<Row>,
-    out_retained: RetainedTotal,
 }
 
-impl Serving<'_, '_> {
+impl<'a, 'g> ClauseRun<'a, 'g> {
+    /// The clause's scaffold for one engagement: the clause's facts and
+    /// its one table set and buffer set, sized for the contract's
+    /// automaton. A pure construction — the walk-start record is each
+    /// entry's own call, so a run built for state alone does not silently
+    /// write PROFILE state.
+    fn new(
+        ctx: ExecCtx<'g>,
+        contract: &'a FrontierContract<'a>,
+        conjuncts: &'a [Expr],
+        reduce: Option<&'a MatchReduce<'a>>,
+    ) -> Self {
+        Self {
+            ctx,
+            contract,
+            conjuncts,
+            reduce,
+            tables: FrontierTables::new(contract.nfa.states as usize),
+            bufs: RuleBuffers::new(),
+        }
+    }
+
     /// Whether the clause's reduce tail is a fold. A fold takes rows
     /// irrevocably, so the distinct-endpoint shape parks its admitted
     /// pairs and replays them once the whole clause is proven. The sink
     /// is the one spelling of that policy — never a second `fold.is_some()`
     /// beside the `MatchReduce` built from the same fold.
     fn defers_fold(&self) -> bool {
-        matches!(
-            self.reduce.map(|reduce| &reduce.sink),
-            Some(ReduceSink::Fold(_))
-        )
+        self.reduce.is_some_and(|reduce| reduce.sink.irrevocable())
+    }
+
+    /// One entering row's seed list: the clause's pattern and the clause's
+    /// flattened conjuncts resolved into the scan segment's residual scope
+    /// — the one place the three facts (the contract's pattern, the
+    /// conjuncts, the row) are paired, so the entries cannot spell the
+    /// scope differently. The clause's sparse tables and buffers are the
+    /// run's own; a run clears them per seed
+    /// ([`FrontierTables::begin_seed`]), so one set serves every seed of
+    /// every row, and nothing here scales with the driving table's width.
+    fn row_seeds(&self, entering: &Row) -> Result<Vec<NodeId>> {
+        // The clause's one pattern is the contract's: the scope reads it
+        // from there rather than from a second path a reader must prove
+        // agrees.
+        let residual = Residual {
+            conjuncts: self.conjuncts,
+            scope: &match_scope(entering, std::slice::from_ref(self.contract.pattern)),
+        };
+        seeds(self.ctx, self.contract, entering, &residual)
     }
 }
 
@@ -281,7 +314,7 @@ fn serve_capped_rows(
         if remaining(want, serving.out.len()).is_none() {
             break;
         }
-        let seeds = row_seeds(serving.ctx, serving.contract, entering, serving.conjuncts)?;
+        let seeds = serving.run.row_seeds(entering)?;
         for seed in seeds {
             // The one cap read: the loop stop and the bound handed to the
             // emission are the same fact, never a `filled` test beside a
@@ -290,13 +323,13 @@ fn serve_capped_rows(
                 break;
             };
             let answer = capped_rows(
-                serving.ctx,
+                serving.run.ctx,
                 seed,
-                serving.contract,
+                serving.run.contract,
                 entering,
                 left,
-                &mut serving.tables,
-                &mut serving.bufs,
+                &mut serving.run.tables,
+                &mut serving.run.bufs,
             )?;
             let (matched, run) = match recorded_capped_run(answer) {
                 Ok(served) => served,
@@ -304,14 +337,14 @@ fn serve_capped_rows(
             };
             for (row, _used) in matched {
                 emit_reduced_row(
-                    serving.ctx,
+                    serving.run.ctx,
                     row,
-                    serving.reduce,
+                    serving.run.reduce,
                     &mut serving.out,
                     &mut serving.out_retained,
                 )?;
             }
-            serving.tables = run.reclaim();
+            serving.run.tables = run.reclaim();
         }
     }
     Ok(None)
@@ -324,86 +357,183 @@ fn serve_capped_rows(
 /// multiplicity the frontier never enumerated. The admission is
 /// stage-fixed — a function of the node alone — so its memo is built once
 /// for the whole clause: a node reached from many seeds *and many rows* is
-/// checked once (LABS-1478). Under a fold every admitted pair is parked
-/// and replayed once the whole clause is proven, because a fold takes rows
-/// irrevocably and a later row's run can still decline. `Ok(Some(reason))`
-/// is the run-time decline; `Ok(None)` is a served clause.
-#[allow(clippy::too_many_arguments)]
+/// checked once (LABS-1478). `Ok(Some(reason))` is the run-time decline;
+/// `Ok(None)` is a served clause.
+///
+/// The clause's fold policy is decided once here, at clause scope, and
+/// hands off to the one shape that serves it: a fold takes rows
+/// irrevocably, so its shape parks and replays, while a consumer that can
+/// take rows back streams them as each run finishes. Neither shape carries
+/// the other's state.
 fn serve_distinct_endpoints(
     serving: &mut Serving<'_, '_>,
     rows: &[Row],
 ) -> Result<Option<FrontierDeclineReason>> {
-    let ctx = serving.ctx;
-    let contract = serving.contract;
-    let pred = Memoized(Admission::of(&contract.target));
-    let mut admitted = None;
-    // The parked pairs are output-cardinality memory: bill each to a
-    // retaining container so the per-value cap refuses them. The total is
-    // scoped to the clause, so it is released with `parked`.
-    let mut parked: Vec<(usize, NodeId, NodeId)> = Vec::new();
+    if serving.run.defers_fold() {
+        serve_parked_pairs(serving, rows)
+    } else {
+        serve_endpoint_rows(serving, rows)
+    }
+}
+
+/// The distinct-endpoint shape for a consumer that can take rows back:
+/// every admitted endpoint of every run is emitted as that run finishes,
+/// charged ahead of its landing.
+fn serve_endpoint_rows(
+    serving: &mut Serving<'_, '_>,
+    rows: &[Row],
+) -> Result<Option<FrontierDeclineReason>> {
+    let Serving {
+        run,
+        out,
+        out_retained,
+    } = serving;
+    let contract = run.contract;
+    let reduce = run.reduce;
+    for_each_admitted_endpoint(run, rows, |ctx, entering, seed, endpoint| {
+        emit_endpoint_row(
+            ctx,
+            entering,
+            contract,
+            reduce,
+            seed,
+            endpoint,
+            out,
+            out_retained,
+        )
+    })
+}
+
+/// The distinct-endpoint shape under a fold: a fold takes rows
+/// irrevocably and a later run can still decline, so every admitted pair
+/// is parked — billed as it lands, to the clause's retaining container, so
+/// the per-value cap refuses it — and replayed only once the whole clause
+/// is proven. The pairs are output-cardinality memory; the total is
+/// scoped to the clause and released with `parked`.
+fn serve_parked_pairs(
+    serving: &mut Serving<'_, '_>,
+    rows: &[Row],
+) -> Result<Option<FrontierDeclineReason>> {
+    let Serving {
+        run,
+        out,
+        out_retained,
+    } = serving;
+    // The charge and the replay below share the one context the callback
+    // is handed, so neither can drift to another binding of it.
+    let ctx = run.ctx;
+    // The parked pair carries the entering row itself: `rows` outlives the
+    // loop, so a reference needs no index to re-resolve at the replay.
+    let mut parked: Vec<(&Row, NodeId, NodeId)> = Vec::new();
     let mut parked_bytes = ctx.graph.retain_bytes(0)?;
-    // The sink is the one spelling of the fold policy.
-    let defer_fold = serving.defers_fold();
-    for (row_index, entering) in rows.iter().enumerate() {
-        let seeds = row_seeds(ctx, contract, entering, serving.conjuncts)?;
-        for seed in seeds {
-            let walked =
-                match seed_run(ctx, contract, seed, &mut serving.tables, &mut serving.bufs)? {
-                    Ok(walked) => walked,
-                    Err(reason) => return Ok(Some(reason.into())),
-                };
-            let pass = SeedPass {
-                contract,
-                entering,
-                seed,
-                walked: &walked,
-                reduce: serving.reduce,
-            };
-            if defer_fold {
-                for_each_admitted(
-                    ctx,
-                    pred,
-                    &mut admitted,
-                    contract.consumer.pair(),
-                    seed,
-                    &walked.endpoints,
-                    |_, endpoint| {
-                        // The charge reads the value that is pushed, never a
-                        // second spelling of its width.
-                        let pair = (row_index, seed, endpoint);
-                        parked_bytes.add_bytes(ctx.graph, std::mem::size_of_val(&pair) as u64)?;
-                        parked.push(pair);
-                        Ok(false)
-                    },
-                )?;
-            } else {
-                endpoint_rows(
-                    ctx,
-                    pred,
-                    &mut admitted,
-                    &pass,
-                    &mut serving.out,
-                    &mut serving.out_retained,
-                )?;
-            }
-            serving.tables = walked.reclaim();
-        }
+    if let Some(reason) =
+        for_each_admitted_endpoint(run, rows, |_ctx, entering, seed, endpoint| {
+            // The charge reads the value that is pushed, never a second
+            // spelling of its width.
+            let pair = (entering, seed, endpoint);
+            parked_bytes.add_bytes(ctx.graph, std::mem::size_of_val(&pair) as u64)?;
+            parked.push(pair);
+            Ok(())
+        })?
+    {
+        return Ok(Some(reason));
     }
     // The parked pairs' emit, once every row's every seed has served.
-    for (row_index, seed, endpoint) in parked {
+    for (entering, seed, endpoint) in parked {
         ctx.graph.cancel_tick()?;
         emit_endpoint_row(
             ctx,
-            &rows[row_index],
-            contract,
-            serving.reduce,
+            entering,
+            run.contract,
+            run.reduce,
             seed,
             endpoint,
-            &mut serving.out,
-            &mut serving.out_retained,
+            out,
+            out_retained,
         )?;
     }
     Ok(None)
+}
+
+/// How a clause's run loop ended, for the one shape whose body can stop it.
+enum RunLoop {
+    /// Every row's every seed ran.
+    Exhausted,
+    /// The body stopped the loop early — the EXISTS probe's hit.
+    Stopped,
+    /// A run declined at run time; the reason is the caller's to map.
+    Declined(FrontierDeclineReason),
+}
+
+/// The two serving shapes' loop: their endpoint bodies consume a run and
+/// never stop the walk, so the stop is not theirs to ask for — the type
+/// says so, rather than handing them a state they cannot produce. The
+/// loop itself and its stop contract are
+/// [`for_each_admitted_endpoint_until`]'s.
+fn for_each_admitted_endpoint<'r>(
+    run: &mut ClauseRun<'_, '_>,
+    rows: &'r [Row],
+    mut f: impl FnMut(ExecCtx<'_>, &'r Row, NodeId, NodeId) -> Result<()>,
+) -> Result<Option<FrontierDeclineReason>> {
+    let outcome = for_each_admitted_endpoint_until(run, rows, |ctx, entering, seed, endpoint| {
+        f(ctx, entering, seed, endpoint)?;
+        Ok(false)
+    })?;
+    match outcome {
+        RunLoop::Declined(reason) => Ok(Some(reason)),
+        // The wrapper's body never stops; this arm is the enum's totality.
+        RunLoop::Exhausted | RunLoop::Stopped => Ok(None),
+    }
+}
+
+/// The clause's run loop, the one owner of the sequence every shape that
+/// walks a clause repeats: the row loop, the row's seed list, the seed's
+/// standard run with its decline mapping, the run's reclaim, and the
+/// run's endpoints through the target's memoized admission and the
+/// clause's boundary-pair comparison. `f` receives each admitted endpoint
+/// — the entering row, the seed, the endpoint — and answers `false` to
+/// keep going, `true` to stop early: the probe's hit, reported as
+/// [`RunLoop::Stopped`] rather than collapsed into a walk that ran to the
+/// end, so its caller can tell the two apart.
+///
+/// A run-time decline is [`RunLoop::Declined`], a value each caller maps
+/// itself: the row rung names it on the PROFILE record, the nested probe
+/// keeps its seek. This is the entry for the one caller whose body
+/// decides whether to stop — the EXISTS probe; the two serving shapes
+/// call [`for_each_admitted_endpoint`] instead.
+fn for_each_admitted_endpoint_until<'r>(
+    run: &mut ClauseRun<'_, '_>,
+    rows: &'r [Row],
+    mut f: impl FnMut(ExecCtx<'_>, &'r Row, NodeId, NodeId) -> Result<bool>,
+) -> Result<RunLoop> {
+    let pred = Memoized(Admission::of(&run.contract.target));
+    let mut admitted = None;
+    // The consumer's boundary pair is a fact of the clause's contract,
+    // not of a seed: read once here, never re-derived in the hot loop.
+    let pair = run.contract.consumer.pair();
+    for entering in rows {
+        for seed in run.row_seeds(entering)? {
+            let walked =
+                match seed_run(run.ctx, run.contract, seed, &mut run.tables, &mut run.bufs)? {
+                    Ok(walked) => walked,
+                    Err(reason) => return Ok(RunLoop::Declined(reason.into())),
+                };
+            let stopped = for_each_admitted(
+                run.ctx,
+                pred,
+                &mut admitted,
+                pair,
+                seed,
+                &walked.endpoints,
+                |ctx, endpoint| f(ctx, entering, seed, endpoint),
+            )?;
+            run.tables = walked.reclaim();
+            if stopped {
+                return Ok(RunLoop::Stopped);
+            }
+        }
+    }
+    Ok(RunLoop::Exhausted)
 }
 
 /// The EXISTS arm (ADR-0478 Decision 2's first shape): a witness
@@ -458,27 +588,30 @@ pub(crate) fn try_frontier_exists(
         Ok(contract) => contract,
         Err(_) => return Ok(None),
     };
-    let mut tables = FrontierTables::new(contract.nfa.states as usize);
-    let mut bufs = RuleBuffers::new();
-    let seeds = row_seeds(ctx, &contract, row, conjuncts)?;
+    let mut run = ClauseRun::new(ctx, &contract, conjuncts, None);
     record_walk_start(WalkStart::seed_side_forward());
-    let pred = Memoized(Admission::of(&contract.target));
-    let mut admitted = None;
-    for seed in seeds {
-        let walked = match seed_run(ctx, &contract, seed, &mut tables, &mut bufs)? {
-            Ok(walked) => walked,
-            // The exists arm is a nested evaluation: a run-time decline
-            // keeps the probe's seek and names nothing on the PROFILE
-            // record.
-            Err(_) => return Ok(None),
-        };
-        let hit = exists_hit(ctx, pred, &mut admitted, &contract, seed, &walked, counted)?;
-        if hit {
-            return Ok(Some(true));
-        }
-        tables = walked.reclaim();
+    // The probe's own endpoint body: any admitted endpoint witnesses
+    // existence — the counted expression (when the fold carried one)
+    // non-null on the boundary pair's row, else the endpoint itself.
+    let outcome = for_each_admitted_endpoint_until(
+        &mut run,
+        std::slice::from_ref(row),
+        |ctx, _entering, seed, endpoint| {
+            let Some(counted) = counted else {
+                return Ok(true);
+            };
+            let mut row = Row::new();
+            bind_boundary(&mut row, ctx, &contract, seed, endpoint);
+            Ok(!eval(ctx.graph, &row, counted, ctx.params)?.is_null())
+        },
+    )?;
+    match outcome {
+        RunLoop::Stopped => Ok(Some(true)),
+        RunLoop::Exhausted => Ok(Some(false)),
+        // The exists arm is a nested evaluation: a run-time decline keeps
+        // the probe's seek and names nothing on the PROFILE record.
+        RunLoop::Declined(_) => Ok(None),
     }
-    Ok(Some(false))
 }
 
 /// The cheapest structural gates both entries share, before any
@@ -501,27 +634,13 @@ pub(super) fn single_quantified<'p>(
     nfa::exactly_one_quantified(&pattern.elements).then_some(pattern)
 }
 
-/// One entering row's seed list: the clause's pattern and the caller's
-/// flattened conjuncts resolved into the scan segment's residual scope —
-/// the one place the three facts (the contract's pattern, the conjuncts,
-/// the row) are paired, so the entries cannot spell the scope differently.
-/// The clause's sparse tables and buffers are the caller's, created once
-/// beside the contract; a run clears them per seed
-/// ([`FrontierTables::begin_seed`]), so one set serves every seed of every
-/// row, and nothing here scales with the driving table's width.
-fn row_seeds(
-    ctx: ExecCtx<'_>,
-    contract: &FrontierContract<'_>,
-    entering: &Row,
-    conjuncts: &[Expr],
-) -> Result<Vec<NodeId>> {
-    // The clause's one pattern is the contract's: the scope reads it from
-    // there rather than from a second path a reader must prove agrees.
-    let residual = Residual {
-        conjuncts,
-        scope: &match_scope(entering, std::slice::from_ref(contract.pattern)),
-    };
-    seeds(ctx, contract, entering, &residual)
+/// The row rung's run state: the clause's [`ClauseRun`] scaffold plus the
+/// output container and its charge. Each serving shape takes `&mut` it and
+/// adds only its own difference.
+struct Serving<'a, 'g> {
+    run: ClauseRun<'a, 'g>,
+    out: Vec<Row>,
+    out_retained: RetainedTotal,
 }
 
 /// One run's outcome through the rider's two facts — the reader the
@@ -585,19 +704,6 @@ pub(super) fn seeds(
 pub(super) fn record_run(facts: FrontierCounters) {
     super::super::count_neighbor_walks(facts.edge_visits);
     super::super::count_frontier(facts);
-}
-
-/// One seed's completed run plus the facts its endpoint passes read: the
-/// compiled contract, the clause's entering row, the seed the run walked
-/// from, the run's tables, and the clause's reduce tail. The two passes
-/// (the distinct-endpoint row pass, the EXISTS hit pass) share it — one
-/// spelling of the per-run bundle instead of five parallel parameters.
-struct SeedPass<'a> {
-    contract: &'a FrontierContract<'a>,
-    entering: &'a Row,
-    seed: NodeId,
-    walked: &'a FrontierRun,
-    reduce: Option<&'a MatchReduce<'a>>,
 }
 
 /// The run's endpoints through the target's admission and the clause's
@@ -675,79 +781,6 @@ fn emit_endpoint_row(
     let mut row = entering.clone();
     bind_boundary(&mut row, ctx, contract, seed, endpoint);
     emit_reduced_row(ctx, row, reduce, out, out_retained)
-}
-
-/// The distinct-endpoint consumer's row pass: every endpoint the run
-/// admitted, through the target's admission and the clause's
-/// boundary-pair comparison, bound to its row (the
-/// boundary pair's full node values — the values the projection's stub
-/// refresh would produce) and the shared `reduce_row` tail — the same
-/// tail the cap rider and the materializing walk run, so an emitted row
-/// is the row the DFS's pipeline would keep. Each landing row charges
-/// the clause's retained running total ahead of the landing — the
-/// rung's second emission point (LABS-1077), threaded in from the
-/// rung's one container total so a refusal never leaves the row landed.
-fn endpoint_rows<P: NodePred>(
-    ctx: ExecCtx<'_>,
-    pred: P,
-    prepared: &mut Option<P::Prepared>,
-    pass: &SeedPass<'_>,
-    out: &mut Vec<Row>,
-    out_retained: &mut RetainedTotal,
-) -> Result<()> {
-    let (pair, seed) = (pass.contract.consumer.pair(), pass.seed);
-    for_each_admitted(
-        ctx,
-        pred,
-        prepared,
-        pair,
-        seed,
-        &pass.walked.endpoints,
-        |ctx, endpoint| {
-            emit_endpoint_row(
-                ctx,
-                pass.entering,
-                pass.contract,
-                pass.reduce,
-                pass.seed,
-                endpoint,
-                out,
-                out_retained,
-            )?;
-            Ok(false)
-        },
-    )?;
-    Ok(())
-}
-
-/// The EXISTS arm's endpoint pass: whether any admitted endpoint
-/// witnesses existence — the counted expression (when the fold carried
-/// one) non-null on the boundary pair's row, else any admitted endpoint.
-fn exists_hit<P: NodePred>(
-    ctx: ExecCtx<'_>,
-    pred: P,
-    prepared: &mut Option<P::Prepared>,
-    contract: &FrontierContract<'_>,
-    seed: NodeId,
-    walked: &FrontierRun,
-    counted: Option<&Expr>,
-) -> Result<bool> {
-    for_each_admitted(
-        ctx,
-        pred,
-        prepared,
-        contract.consumer.pair(),
-        seed,
-        &walked.endpoints,
-        |ctx, endpoint| {
-            let Some(counted) = counted else {
-                return Ok(true);
-            };
-            let mut row = Row::new();
-            bind_boundary(&mut row, ctx, contract, seed, endpoint);
-            Ok(!eval(ctx.graph, &row, counted, ctx.params)?.is_null())
-        },
-    )
 }
 
 /// The capped emission's one cap read: how many rows the run may still
