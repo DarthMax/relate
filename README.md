@@ -146,7 +146,7 @@ An example session:
 ```
 $ relate query --database ./friends
 
-Relate v1.2.0
+Relate v1.2.1
 Type .help for help, .exit to quit.
 
 cypher> CREATE (alice:Person {name: 'Alice', age: 30});
