@@ -2040,7 +2040,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relate"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "crc32fast",
  "indexmap",
@@ -2068,7 +2068,7 @@ dependencies = [
 
 [[package]]
 name = "relate-agentbench"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "clap",
  "relate-formatter",
@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "relate-arrow"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2093,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "relate-auth"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "base64",
  "rand",
@@ -2104,7 +2104,7 @@ dependencies = [
 
 [[package]]
 name = "relate-bolt"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "clap",
@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "relate-catalog"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-core",
  "relate-model",
@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "relate-cli"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "base64",
  "chrono",
@@ -2175,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "relate-codec-lab"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate",
  "relate-datasets",
@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "relate-core"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "relate-datasets"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "clap",
@@ -2220,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "relate-dungeon"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-wire",
  "serde",
@@ -2229,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "relate-eggs"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "crossterm",
  "relate",
@@ -2238,7 +2238,7 @@ dependencies = [
 
 [[package]]
 name = "relate-engine-api"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-catalog",
  "relate-core",
@@ -2253,7 +2253,7 @@ dependencies = [
 
 [[package]]
 name = "relate-error"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-core",
  "relate-parser",
@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "relate-executor"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2293,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "relate-feedback"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "fs4",
@@ -2309,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "relate-ffi"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "relate",
@@ -2322,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "relate-formatter"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "indexmap",
@@ -2337,7 +2337,7 @@ dependencies = [
 
 [[package]]
 name = "relate-front"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-core",
  "relate-error",
@@ -2351,7 +2351,7 @@ dependencies = [
 
 [[package]]
 name = "relate-fs-to-graph"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-test-support",
  "relate-wire",
@@ -2362,7 +2362,7 @@ dependencies = [
 
 [[package]]
 name = "relate-git-to-graph"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-core",
  "relate-test-support",
@@ -2374,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "relate-graph-examples"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate",
  "relate-load",
@@ -2389,7 +2389,7 @@ dependencies = [
 
 [[package]]
 name = "relate-http"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "flate2",
@@ -2409,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "relate-ideas"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-wire",
  "serde",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "relate-ir"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-core",
  "relate-names",
@@ -2427,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "relate-load"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "base64",
  "relate",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "relate-markdown"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-core",
  "saphyr-parser",
@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "relate-mcp"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate",
  "relate-auth",
@@ -2470,7 +2470,7 @@ dependencies = [
 
 [[package]]
 name = "relate-model"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "indexmap",
@@ -2480,14 +2480,14 @@ dependencies = [
 
 [[package]]
 name = "relate-names"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "rustc-hash",
 ]
 
 [[package]]
 name = "relate-ontology"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "indexmap",
  "relate-core",
@@ -2502,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "relate-parser"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-model",
  "relate-names",
@@ -2512,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "relate-planner"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-catalog",
  "relate-core",
@@ -2525,7 +2525,7 @@ dependencies = [
 
 [[package]]
 name = "relate-python"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "arrow-ipc",
  "chrono",
@@ -2541,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "relate-query-latency"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "clap",
  "csv",
@@ -2559,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "relate-serve"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-test-support",
  "signal-hook 0.4.6",
@@ -2567,11 +2567,11 @@ dependencies = [
 
 [[package]]
 name = "relate-splitter"
-version = "1.1.1"
+version = "1.2.0"
 
 [[package]]
 name = "relate-storage"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "arrow",
  "bytes",
@@ -2603,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "relate-test-support"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "flate2",
@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "relate-wasm"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "console_error_panic_hook",
  "crc32fast",
@@ -2647,7 +2647,7 @@ dependencies = [
 
 [[package]]
 name = "relate-wire"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "relate-write-local"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "relate-core",
  "relate-engine-api",
@@ -3830,7 +3830,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "serde",
  "serde_json",

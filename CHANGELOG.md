@@ -7,6 +7,195 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-11-20
+
+### Added
+
+- Mistral Vibe joins the `relate skill install` agent catalog. A machine
+  with `~/.vibe` gets a `vibe:` row in `relate skill list`, and
+  `relate skill install --agent vibe` (or a bare `relate skill install`,
+  which targets every detected agent) writes the skill bundle to
+  `~/.vibe/skills/relate` — detection, install, `skill check` drift
+  detection and the `relate upgrade` refresh treat it like every other
+  agent.
+- `EXPLAIN` warns with `01N60` when the statement references a parameter
+  the caller did not supply, one notification naming every undefined
+  parameter — `EXPLAIN RETURN $foo` reports `The undefined parameter(s)
+  $foo prevent plan reuse.` A fully supplied statement warns nothing.
+  `PROFILE` and the plain path are unchanged: both refuse the statement
+  with the ADR-0308 error instead, and `EXPLAIN` keeps planning without
+  parameter values, as in the reference server.
+- New .NET client `Relate.Net` under `clients/dotnet` (ADR-0625): an
+  embedded C#, F# and Visual Basic API over the typed C ABI v2, with
+  disposable databases, connections and transactions, typed parameters,
+  graph and temporal values, result metadata and structured errors. CI
+  builds the native library from the same checkout and runs the
+  three-language tests on Linux, macOS and Windows.
+
+### Changed
+
+- `EXPLAIN`/`PROFILE` plan trees show display-only child steps under an
+  index-seek-started `MATCH` — the seek step plus one `Expand` step per
+  hop, in the CLI's plan table and as fused-flagged children in the
+  structured plan (Bolt `queryPlan`/`profiledQueryPlan`, HTTP v2, the
+  CLI's machine modes). Execution is unchanged: the clause stays the
+  executed unit; consumers that require per-operator metrics skip the
+  children.
+- `MATCH (n:L) RETURN n.p, count(*)` and the min, max and `count(n.p)`
+  aggregates over one labeled property now answer from the existing
+  `(L, p)` index instead of scanning every node of the label — the
+  `group_by_age` query of the SF0.1 latency suite drops from 17.3 ms to
+  6.2 ms. Results are unchanged: whenever the index cannot serve the
+  answer exactly, the aggregate falls back to the scan's exact answer
+  (ADR-0611).
+- Two parameter-name spellings Neo4j accepts now plan and run: the
+  backtick-quoted name (``$`p1``, ``$`p 1``) and whitespace between `$`
+  and the name (`$ p2`) — both previously failed at the lexer with
+  `InvalidParameterName`. Every `$name` render now goes through one
+  canonical quoting policy, so two different parameter names can never
+  collide in a plan-cache key; `$ €`, a bare `$` and `$ (x)` keep their
+  rejections.
+- Dense id-span stores reserve the smaller of a 1.5-growth ladder rung
+  and the old power-of-two doubling, and the memory floor charges
+  exactly that reservation — the worst-case slot slack in a restored
+  store drops from below 2× to below 1.5× (ADR-0617).
+- A constraint, index or database can now be literally named `null`:
+  `CREATE CONSTRAINT null …`, `CREATE INDEX null`, `DROP CONSTRAINT
+  null`, `DROP INDEX null`, `ALTER DATABASE null` and
+  `SHOW DATABASE null` parse and run, as in Neo4j. String-literal names
+  and the continuation keywords stay rejected.
+- Redundant parentheses around a projection item no longer change its
+  meaning: `WITH (n)`, `WITH DISTINCT(n)`,
+  `RETURN DISTINCT(n.p1) ORDER BY n.p1` and `GROUP BY (a)` now behave
+  exactly like their unparenthesized forms — alias rules, ordering under
+  `DISTINCT`, grouping keys and exemptions, `CALL` imports and the
+  rendered column names — as Neo4j treats them. A property access keeps
+  Neo4j's verbatim column name (`(n.p1)` names its column `(n.p1)`), and
+  no restriction is loosened: every pinned refusal keeps its verdict.
+- The Java client now publishes to Maven Central by default from a
+  Publish-to-registries workflow dispatch, over a repaired natives gate
+  (the `release` environment still gates the credentials, and
+  `autoPublish=false` still leaves the Central Portal release in hand;
+  uncheck `maven` to publish only the other registries).
+- Cypher text may carry `\uXXXX` unicode escapes in the whitespace
+  between tokens and in identifier text — `\u2028` between two tokens
+  reads as whitespace, `\u0041` as the identifier `A` — matching the
+  reference server's decoding. Parameters, numbers, comments and
+  backtick names keep their rejections: an escape cannot spell a
+  parameter name or any other token (ADR-0619).
+- A fixed-length clause entered by two or more rows now runs on the
+  frontier kernel, one run per entering row, instead of falling to the
+  per-row walker — the walker enumerates trails, exponentially on a
+  dense cyclic component. A single row whose run declines at run time
+  still drags the clause to the walker.
+- A checkpoint reopen now decodes and installs across all cores — one
+  Parquet reader per row-group span, a slice-based bulk install that
+  reads rows in place — so reopening a large store drops from 1225 ms
+  to 461 ms on the measured fraud shape (2.66×; 1.36× on a shape whose
+  restore work was already sharded). Restore rows are read in place and
+  installed in bounded slices, so peak restore memory is
+  `max(rows, graph)`, not `rows + graph`.
+- Every release now publishes the Java client to Maven Central
+  automatically through the release pipeline, and the publish profile
+  gains a dry run that rehearses it against `main` without uploading.
+- The engine's sidecar directory inside a store is `.relate/`, not
+  `.cypherlite/` (the schema-files mirror moves with it): a writable
+  open adopts an existing store in place with one directory rename,
+  run as the last step before the lease so an open refused by any
+  earlier check never renames the user's directory — natively, and
+  through a caller-supplied `Vfs` (`Database::open_vfs`,
+  `StoreTarget::from_vfs_with_codec`) the same way. A read-only open
+  never adopts: a store still carrying the legacy `.cypherlite/`
+  markdown sidecar refuses closed, naming the one writable pass that
+  adopts it, and a legacy `.cypherlite/` without the manifest (a
+  classic store's schema mirror alone) is inert and opens unchanged.
+  The lock and writer marker files keep their names.
+- `USING RANGE INDEX n:L1(p1)` now parses and validates like the plain
+  `USING INDEX` hint, as in Neo4j: the hinted variable, label and WHERE
+  predicate pass the same fulfillability checks (42N62/42N76), and the
+  plan-time 01N31 warning names the hint as written
+  (`'RANGE INDEX :L1(p1)'`). The hint still steers nothing — Relate's
+  planner is not cost-based, so the kinds differ only in the rendered
+  spelling.
+- Label expressions now parse in every node pattern a query can write,
+  not only MATCH patterns: a `WHERE` pattern predicate
+  (`WHERE (a:L1|L2)<-[:R]-(b)`) and a pattern comprehension's leading
+  node (`[(x:L1&L2)-[:R]->(y) | y]`) accept the full grammar — `|`, `&`,
+  `!`, `%`, parenthesized groups, colon-chains and dynamic atoms — as
+  Neo4j does. Both positions previously failed at the parse: the
+  predicate read as a parenthesized `a:L1|L2` the relationship then
+  broke, and the comprehension read as a list literal (ADR-0626).
+- A filtered list comprehension's map expression may now be a map
+  projection: `[n IN nodes(p) WHERE n:L1 | n{.p1}]` keeps the WHERE's
+  label predicate and projects each surviving element through `n{.p1}`,
+  as in Neo4j. The `|` was previously eaten by the label disjunction
+  (`n:L1|n`), leaving the projection's `{` an unexpected token; a
+  genuine disjunction with no map expression (`[m IN list WHERE m:A|B]`)
+  keeps its reading.
+- `SET n.p1 = EXISTS((n)-[:R]->(:L2))` now plans, executes and stores the
+  predicate's boolean per row, as in Neo4j: a SET value accepts the same
+  pattern-expression positions a projection does — the `exists(<pattern>)`
+  argument, a comprehension's WHERE filter, and predicate positions
+  (`NOT`, boolean operands, a `CASE WHEN` condition). A bare pattern as
+  the value (`SET n.p1 = (n)--()`) keeps its rejection with the SET
+  spelling.
+- Property access on an aggregation result now plans and evaluates, as
+  in Neo4j: `RETURN max(n.p1).p2` and `RETURN collect(n)[0].p1` treat a
+  property whose target carries an aggregation as part of the
+  aggregating expression instead of a non-grouping reference — the
+  aggregate folds first and the property applies to its result (a
+  node-typed `collect(n)[0].p1` reads the node's property; a scalar
+  result keeps the existing property-on-scalar type error). A genuinely
+  non-aggregated leaf beside the property (`max(n.p1).p2 + n.q`) keeps
+  its grouping-key rejection.
+- Aggregations grouped by a relationship's property with a selective
+  predicate on the start node — for example `MATCH (e:Entity)<-[r:RESOLVED_TO]-(m:Mention)
+  WHERE e.id IN $seeds RETURN e.id AS ent, r.method AS method, count(m) AS n` — no
+  longer scan every node of the start label and walk every one of its
+  edges: the predicate's seeks now answer the fold's start scan, walking
+  only the sought nodes' adjacencies. Results are unchanged — every
+  predicate still applies on the fully bound row.
+- A GQL type predicate inside a comprehension's WHERE filter now leaves
+  the trailing `|` to the comprehension's map separator, as in Neo4j:
+  `[k IN keys(n) WHERE n[k] IS :: STRING | k]` plans and runs (a genuine
+  `IS :: STRING | INTEGER` union inside the filter still parses
+  greedily), and every `IS [NOT] ::` / `IS TYPED` / bare `::` spelling
+  works in list, pattern, and CIP-272 map comprehensions.
+- `USING TEXT INDEX n:L1(p1)` now parses and validates like the plain
+  `USING INDEX` and `USING RANGE INDEX` hints, as in Neo4j: the hinted
+  variable, label and WHERE predicate pass the same fulfillability
+  checks (42N62/42N76), and the plan-time 01N31 warning names the hint
+  as written (`'TEXT INDEX :L1(p1)'`). The hint still steers nothing —
+  Relate's planner is not cost-based.
+- A pattern predicate inside a quantifier's WHERE (`all`, `any`, `none`,
+  `single`) is now accepted in WITH/RETURN projections and SET values,
+  as in Neo4j: `RETURN all(x IN $p1 WHERE (:L1 {p1: x})<-[:R]-(:L2
+  {p1: $p2}))` evaluates the pattern per element; bare pattern
+  projection items and patterns in value subexpressions keep their
+  rejections.
+
+### Fixed
+
+- EXPLAIN of a long clause chain (roughly 249+ chained clauses) no
+  longer panics the plan-wire walk (`plan wire node is a map, got
+  Null`): the plan tree is engine-produced metadata, so its crossing to
+  the wire form no longer rides the ADR-0462 value-nesting depth cap
+  (ADR-0628); the cap still governs runtime data values.
+
+### Notes
+
+- The 1.1.0 Swift entries were misfiled under [1.0.2] by their pull requests and moved to their release (ADR-0618).
+- The shortest-route fan, anchor, selector and class-walk work landed as consolidation campaigns — no user-facing change (#499, #497).
+- The PR cycle is now stated as one loop in the repository's agent contract, the ready flip the agent's own signal and the merge a separate authorization (#525).
+- The decision-record corpus is now a queryable markdown vault (ADR-0621), and the adr-numbers CI gate reads the frontmatter `claim:` mint proof from every added ADR.
+- Changelog entries now arrive as `.changes/` fragment files — one per
+  pull request, named `<PR number>-<slug>.md` — collected into the
+  version section at the release cut; a pull request no longer edits
+  CHANGELOG.md (ADR-0627).
+- The Linear workspace was renamed LABS → REL8: REL8-NNNN is the ticket-id
+  spelling, an old LABS-NNNN reference means REL8-NNNN, and the
+  ADR-number and release-notes reference checks refuse both spellings.
+
 ## [1.1.0] — 2026-11-17
 
 ### Added
@@ -180,8 +369,9 @@ First release of Relate — the embedded, in-memory property graph engine
 with an openCypher query contract, WAL + snapshot durability, and Bolt
 serving. See the README for the full surface list.
 
-[Unreleased]: https://github.com/relatedb/relate/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/relatedb/relate/compare/v1.2.0...HEAD
 
+[1.2.0]: https://github.com/relatedb/relate/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/relatedb/relate/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/relatedb/relate/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/relatedb/relate/compare/v1.0.0...v1.0.1
